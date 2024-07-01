@@ -127,7 +127,7 @@ def main():
 
             extra = ""
             if util.EXECUTABLE:
-                extra = " - Executable"
+                extra = " - Executable ({})".format(version.__variant__)
             else:
                 git_head = util.git_head()
                 if git_head:
@@ -183,7 +183,13 @@ def main():
             else:
                 extractor._module_iter = iter(modules[0])
 
-        if args.list_modules:
+        if args.update:
+            from . import update
+            extr = update.UpdateExtractor.from_url("update:" + args.update)
+            ujob = update.UpdateJob(extr)
+            return ujob.run()
+
+        elif args.list_modules:
             extractor.modules.append("")
             sys.stdout.write("\n".join(extractor.modules))
 
@@ -207,14 +213,20 @@ def main():
 
             if cnt is None:
                 log.error("Database file not available")
+                return 1
             else:
                 log.info(
                     "Deleted %d %s from '%s'",
                     cnt, "entry" if cnt == 1 else "entries", cache._path(),
                 )
 
-        elif args.config_init:
-            return config.initialize()
+        elif args.config:
+            if args.config == "init":
+                return config.initialize()
+            elif args.config == "status":
+                return config.status()
+            else:
+                return config.open_extern()
 
         else:
             if not args.urls and not args.input_files:
@@ -287,6 +299,8 @@ def main():
                     else:
                         input_manager.success()
 
+                except exception.StopExtraction:
+                    pass
                 except exception.TerminateExtraction:
                     pass
                 except exception.RestartExtraction:
@@ -299,6 +313,7 @@ def main():
 
                 input_manager.next()
             return retval
+        return 0
 
     except KeyboardInterrupt:
         raise SystemExit("\nKeyboardInterrupt")

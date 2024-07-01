@@ -11,6 +11,7 @@
 import os
 import re
 import ssl
+import sys
 import time
 import netrc
 import queue
@@ -42,6 +43,7 @@ class Extractor():
     browser = None
     request_interval = 0.0
     request_interval_min = 0.0
+    request_interval_429 = 60.0
     request_timestamp = 0.0
 
     def __init__(self, match):
@@ -202,7 +204,9 @@ class Extractor():
                         self.log.warning("Cloudflare CAPTCHA")
                         break
 
-                if code == 429 and self._interval_429:
+                if code == 429 and self._handle_429(response):
+                    continue
+                elif code == 429 and self._interval_429:
                     pass
                 elif code not in retry_codes and code < 500:
                     break
@@ -229,6 +233,8 @@ class Extractor():
             tries += 1
 
         raise exception.HttpError(msg, response)
+
+    _handle_429 = util.false
 
     def wait(self, seconds=None, until=None, adjust=1.0,
              reason="rate limit"):
@@ -263,6 +269,8 @@ class Extractor():
         time.sleep(seconds)
 
     def input(self, prompt, echo=True):
+        self._check_input_allowed(prompt)
+
         if echo:
             try:
                 return input(prompt)
@@ -271,13 +279,30 @@ class Extractor():
         else:
             return getpass.getpass(prompt)
 
+    def _check_input_allowed(self, prompt=""):
+        input = self.config("input")
+
+        if input is None:
+            try:
+                input = sys.stdin.isatty()
+            except Exception:
+                input = False
+
+        if not input:
+            raise exception.StopExtraction(
+                "User input required (%s)", prompt.strip(" :"))
+
     def _get_auth_info(self):
         """Return authentication information as (username, password) tuple"""
         username = self.config("username")
         password = None
 
         if username:
-            password = self.config("password") or util.LazyPrompt()
+            password = self.config("password")
+            if not password:
+                self._check_input_allowed("password")
+                password = util.LazyPrompt()
+
         elif self.config("netrc", False):
             try:
                 info = netrc.netrc().authenticators(self.category)
@@ -304,7 +329,7 @@ class Extractor():
             self.request_interval_min,
         )
         self._interval_429 = util.build_duration_func(
-            self.config("sleep-429", 60),
+            self.config("sleep-429", self.request_interval_429),
         )
 
         if self._retries < 0:
@@ -837,6 +862,9 @@ def _build_requests_adapter(ssl_options, ssl_ciphers, source_address):
     if ssl_options or ssl_ciphers:
         ssl_context = urllib3.connection.create_urllib3_context(
             options=ssl_options or None, ciphers=ssl_ciphers)
+        if not requests.__version__ < "2.32":
+            # https://github.com/psf/requests/pull/6731
+            ssl_context.load_default_certs()
         ssl_context.check_hostname = False
     else:
         ssl_context = None

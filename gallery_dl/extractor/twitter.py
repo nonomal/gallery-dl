@@ -36,6 +36,7 @@ class TwitterExtractor(Extractor):
         self.user = match.group(1)
 
     def _init(self):
+        self.unavailable = self.config("unavailable", False)
         self.textonly = self.config("text-tweets", False)
         self.retweets = self.config("retweets", False)
         self.replies = self.config("replies", True)
@@ -143,6 +144,15 @@ class TwitterExtractor(Extractor):
 
     def _extract_media(self, tweet, entities, files):
         for media in entities:
+
+            if "ext_media_availability" in media:
+                ext = media["ext_media_availability"]
+                if ext.get("status") == "Unavailable":
+                    self.log.warning("Media unavailable (%s - '%s')",
+                                     tweet["id_str"], ext.get("reason"))
+                    if not self.unavailable:
+                        continue
+
             descr = media.get("ext_alt_text")
             width = media["original_info"].get("width", 0)
             height = media["original_info"].get("height", 0)
@@ -311,7 +321,16 @@ class TwitterExtractor(Extractor):
             "quote_count"   : tget("quote_count"),
             "reply_count"   : tget("reply_count"),
             "retweet_count" : tget("retweet_count"),
+            "bookmark_count": tget("bookmark_count"),
         }
+
+        if "views" in tweet:
+            try:
+                tdata["view_count"] = int(tweet["views"]["count"])
+            except Exception:
+                tdata["view_count"] = 0
+        else:
+            tdata["view_count"] = 0
 
         if "note_tweet" in tweet:
             note = tweet["note_tweet"]["note_tweet_results"]["result"]
@@ -842,6 +861,24 @@ class TwitterQuotesExtractor(TwitterExtractor):
         url = "{}/search?q=quoted_tweet_id:{}".format(self.root, self.user)
         data = {"_extractor": TwitterSearchExtractor}
         yield Message.Queue, url, data
+
+
+class TwitterProfileExtractor(TwitterExtractor):
+    """Extractor a user's profile data"""
+    subcategory = "profile"
+    pattern = BASE_PATTERN + r"/(?!search)([^/?#]+)/profile"
+    example = "https://x.com/USER/profile"
+
+    def items(self):
+        api = TwitterAPI(self)
+
+        screen_name = self.user
+        if screen_name.startswith("id:"):
+            user = api.user_by_rest_id(screen_name[3:])
+        else:
+            user = api.user_by_screen_name(screen_name)
+
+        return iter(((Message.Directory, self._transform_user(user)),))
 
 
 class TwitterAvatarExtractor(TwitterExtractor):
@@ -1709,11 +1746,16 @@ class TwitterAPI():
             variables["cursor"] = cursor
 
     def _handle_ratelimit(self, response):
-        if self.extractor.config("ratelimit") == "abort":
+        rl = self.extractor.config("ratelimit")
+        if rl == "abort":
             raise exception.StopExtraction("Rate limit exceeded")
-
-        until = response.headers.get("x-rate-limit-reset")
-        self.extractor.wait(until=until, seconds=None if until else 60)
+        elif rl and isinstance(rl, str) and rl.startswith("wait:"):
+            until = None
+            seconds = text.parse_float(rl.partition(":")[2]) or 60.0
+        else:
+            until = response.headers.get("x-rate-limit-reset")
+            seconds = None if until else 60.0
+        self.extractor.wait(until=until, seconds=seconds)
 
     def _process_tombstone(self, entry, tombstone):
         text = (tombstone.get("richText") or tombstone["text"])["text"]
@@ -1849,7 +1891,7 @@ def _login_impl(extr, username, password):
                 },
             }
         elif subtask == "LoginEnterAlternateIdentifierSubtask":
-            alt = extr.input(
+            alt = extr.config("username-alt") or extr.input(
                 "Alternate Identifier (username, email, phone number): ")
             data = {
                 "enter_text": {
@@ -1881,8 +1923,9 @@ def _login_impl(extr, username, password):
             raise exception.AuthenticationError("Login requires CAPTCHA")
         elif subtask == "DenyLoginSubtask":
             raise exception.AuthenticationError("Login rejected as suspicious")
-        elif subtask == "ArkoseLogin":
-            raise exception.AuthenticationError("No auth token cookie")
+        elif subtask == "LoginSuccessSubtask":
+            raise exception.AuthenticationError(
+                "No 'auth_token' cookie received")
         else:
             raise exception.StopExtraction("Unrecognized subtask %s", subtask)
 

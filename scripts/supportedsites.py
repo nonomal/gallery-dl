@@ -60,6 +60,7 @@ CATEGORY_MAP = {
     "hentaihand"     : "HentaiHand",
     "hentaihere"     : "HentaiHere",
     "hentaiimg"      : "Hentai Image",
+    "hentainexus"    : "HentaiNexus",
     "hitomi"         : "Hitomi.la",
     "horne"          : "horne",
     "idolcomplex"    : "Idol Complex",
@@ -137,6 +138,7 @@ CATEGORY_MAP = {
     "tumblrgallery"  : "TumblrGallery",
     "vanillarock"    : "もえぴりあ",
     "vidyart2"       : "/v/idyart2",
+    "vidyapics"      : "Vidya Booru",
     "vk"             : "VK",
     "vsco"           : "VSCO",
     "wallpapercave"  : "Wallpaper Cave",
@@ -164,6 +166,7 @@ SUBCATEGORY_MAP = {
     "media"  : "Media Files",
     "note"   : "Images from Notes",
     "popular": "Popular Images",
+    "profile": "User Profile Data",
     "recent" : "Recent Images",
     "search" : "Search Results",
     "status" : "Images from Statuses",
@@ -465,7 +468,7 @@ def build_extractor_list():
     """Generate a sorted list of lists of extractor classes"""
     categories = collections.defaultdict(lambda: collections.defaultdict(list))
     default = categories[""]
-    domains = {}
+    domains = {"": ""}
 
     for extr in extractor._list_classes():
         category = extr.category
@@ -477,6 +480,9 @@ def build_extractor_list():
                 domains[category] = domain(extr)
         else:
             base = categories[extr.basecategory]
+            if not extr.instances:
+                base[""].append(extr.subcategory)
+                continue
             for category, root, info in extr.instances:
                 base[category].append(extr.subcategory)
                 if category not in domains:
@@ -588,5 +594,5 @@ Consider all listed sites to potentially be NSFW.
 categories, domains = build_extractor_list()
 PATH = (sys.argv[1] if len(sys.argv) > 1 else
         util.path("docs", "supportedsites.md"))
-with util.lazy(PATH) as file:
-    file.write(generate_output(COLUMNS, categories, domains))
+with util.lazy(PATH) as fp:
+    fp.write(generate_output(COLUMNS, categories, domains))
