@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2022-2023 Mike Fährmann
+# Copyright 2022-2025 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,30 +9,30 @@
 """Extractors for Nitter instances"""
 
 from .common import BaseExtractor, Message
-from .. import text
+from .. import text, util
 import binascii
 
 
 class NitterExtractor(BaseExtractor):
     """Base class for nitter extractors"""
     basecategory = "nitter"
-    directory_fmt = ("{category}", "{user[name]}")
+    directory_fmt = ("nitter", "{user[name]}")
     filename_fmt = "{tweet_id}_{num}.{extension}"
     archive_fmt = "{tweet_id}_{num}"
+    useragent = util.USERAGENT_GALLERYDL
+    request_interval = (0.5, 1.5)
 
     def __init__(self, match):
         self.cookies_domain = self.root.partition("://")[2]
         BaseExtractor.__init__(self, match)
 
-        lastindex = match.lastindex
-        self.user = match.group(lastindex)
-        self.user_id = match.group(lastindex + 1)
+        self.user = self.groups[-2]
+        self.user_id = self.groups[-1]
         self.user_obj = None
 
     def items(self):
         retweets = self.config("retweets", False)
-        videos = self.config("videos", True)
-        if videos:
+        if videos := self.config("videos", True):
             ytdl = (videos == "ytdl")
             videos = True
             self.cookies.set("hlsPlayback", "on", domain=self.cookies_domain)
@@ -43,11 +43,8 @@ class NitterExtractor(BaseExtractor):
                 self.log.debug("Skipping %s (retweet)", tweet["tweet_id"])
                 continue
 
-            attachments = tweet.pop("_attach", "")
-            if attachments:
+            if attachments := tweet.pop("_attach", ""):
                 files = []
-                append = files.append
-
                 for url in text.extract_iter(
                         attachments, 'href="', '"'):
 
@@ -67,15 +64,12 @@ class NitterExtractor(BaseExtractor):
                     file = {"url": url, "_http_retry": _retry_on_404}
                     file["filename"], _, file["extension"] = \
                         name.rpartition(".")
-                    append(file)
+                    files.append(file)
 
                 if videos and not files:
                     if ytdl:
-                        append({
-                            "url": "ytdl:{}/i/status/{}".format(
-                                self.root, tweet["tweet_id"]),
-                            "extension": None,
-                        })
+                        url = f"ytdl:{self.root}/i/status/{tweet['tweet_id']}"
+                        files.append({"url": url, "extension": "mp4"})
                     else:
                         for url in text.extract_iter(
                                 attachments, 'data-url="', '"'):
@@ -88,7 +82,7 @@ class NitterExtractor(BaseExtractor):
 
                             if url[0] == "/":
                                 url = self.root + url
-                            append({
+                            files.append({
                                 "url"      : "ytdl:" + url,
                                 "filename" : name.rpartition(".")[0],
                                 "extension": "mp4",
@@ -98,13 +92,14 @@ class NitterExtractor(BaseExtractor):
                                 attachments, '<source src="', '"'):
                             if url[0] == "/":
                                 url = self.root + url
-                            append(text.nameext_from_url(url, {"url": url}))
+                            files.append(
+                                text.nameext_from_url(url, {"url": url}))
 
             else:
                 files = ()
             tweet["count"] = len(files)
 
-            yield Message.Directory, tweet
+            yield Message.Directory, "", tweet
             for tweet["num"], file in enumerate(files, 1):
                 url = file["url"]
                 file.update(tweet)
@@ -121,7 +116,7 @@ class NitterExtractor(BaseExtractor):
         return {
             "author"  : author,
             "user"    : self.user_obj or author,
-            "date"    : text.parse_datetime(
+            "date"    : self.parse_datetime(
                 extr('title="', '"'), "%b %d, %Y · %I:%M %p %Z"),
             "tweet_id": link.rpartition("/")[2].partition("#")[0],
             "content": extr('class="tweet-content', "</div").partition(">")[2],
@@ -149,7 +144,7 @@ class NitterExtractor(BaseExtractor):
         return {
             "author"  : author,
             "user"    : self.user_obj or author,
-            "date"    : text.parse_datetime(
+            "date"    : self.parse_datetime(
                 extr('title="', '"'), "%b %d, %Y · %I:%M %p %Z"),
             "tweet_id": link.rpartition("/")[2].partition("#")[0],
             "content" : extr('class="quote-text', "</div").partition(">")[2],
@@ -180,7 +175,7 @@ class NitterExtractor(BaseExtractor):
             "nick"            : extr('title="', '"'),
             "name"            : extr('title="@', '"'),
             "description"     : extr('<p dir="auto">', '<'),
-            "date"            : text.parse_datetime(
+            "date"            : self.parse_datetime(
                 extr('class="profile-joindate"><span title="', '"'),
                 "%I:%M %p - %d %b %Y"),
             "statuses_count"  : text.parse_int(extr(
@@ -206,10 +201,10 @@ class NitterExtractor(BaseExtractor):
 
         if self.user_id:
             self.user = self.request(
-                "{}/i/user/{}".format(self.root, self.user_id),
+                f"{self.root}/i/user/{self.user_id}",
                 allow_redirects=False,
             ).headers["location"].rpartition("/")[2]
-        base_url = url = "{}/{}{}".format(self.root, self.user, path)
+        base_url = url = f"{self.root}/{self.user}{path}"
 
         while True:
             tweets_html = self.request(url).text.split(
@@ -236,23 +231,23 @@ class NitterExtractor(BaseExtractor):
 BASE_PATTERN = NitterExtractor.update({
     "nitter.net": {
         "root": "https://nitter.net",
-        "pattern": r"nitter\.net",
+        "pattern": r"(?:www\.)?nitter\.net",
     },
-    "nitter.1d4.us": {
-        "root": "https://nitter.1d4.us",
-        "pattern": r"nitter\.1d4\.us",
+    "nitter.space": {
+        "root": "https://nitter.space",
+        "pattern": r"(?:www\.)?nitter\.space",
     },
-    "nitter.kavin.rocks": {
-        "root": "https://nitter.kavin.rocks",
-        "pattern": r"nitter\.kavin\.rocks",
+    "nitter.tiekoetter": {
+        "root": "https://nitter.tiekoetter",
+        "pattern": r"(?:www\.)?nitter\.tiekoetter\.com",
     },
-    "nitter.unixfox.eu": {
-        "root": "https://nitter.unixfox.eu",
-        "pattern": r"nitter\.unixfox\.eu",
+    "xcancel": {
+        "root": "https://xcancel.com",
+        "pattern": r"(?:www\.)?xcancel\.com",
     },
-    "nitter.it": {
-        "root": "https://nitter.it",
-        "pattern": r"nitter\.it",
+    "lightbrd": {
+        "root": "https://lightbrd.com",
+        "pattern": r"(?:www\.)?lightbrd\.com",
     },
 })
 
@@ -298,14 +293,14 @@ class NitterSearchExtractor(NitterExtractor):
 class NitterTweetExtractor(NitterExtractor):
     """Extractor for nitter tweets"""
     subcategory = "tweet"
-    directory_fmt = ("{category}", "{user[name]}")
+    directory_fmt = ("nitter", "{user[name]}")
     filename_fmt = "{tweet_id}_{num}.{extension}"
     archive_fmt = "{tweet_id}_{num}"
     pattern = BASE_PATTERN + r"/(i/web|[^/?#]+)/status/(\d+())"
     example = "https://nitter.net/USER/status/12345"
 
     def tweets(self):
-        url = "{}/i/status/{}".format(self.root, self.user)
+        url = f"{self.root}/i/status/{self.user}"
         html = text.extr(self.request(url).text, 'class="main-tweet', '''\
                 </div>
               </div></div></div>''')

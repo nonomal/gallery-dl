@@ -16,23 +16,27 @@ __tests__ = (
 
     "categories": [
         "Outdoor",
-        "MILF",
         "Boots",
-        "Amateur",
+        "MILF",
+        "Hairy",
         "Sexy",
+        "Pussy",
+        "Spreading",
     ],
     "channel"   : ["FTV MILFs"],
     "count"     : 17,
     "gallery_id": 62610699,
-    "models"    : ["Danielle"],
+    "models"    : ["Danielle Maye"],
     "num"       : int,
     "slug"      : "british-beauty-danielle-flashes-hot-breasts-ass-and-snatch-in-the-forest",
     "tags"      : [
         "MILF Outdoor",
-        "Amateur MILF",
+        "Forest",
         "Nature",
-        "Amateur Outdoor",
-        "First Time",
+        "Pussy Flash",
+        "Open Pussy",
+        "Hairy Pussy Spread",
+        "Thigh High Boots",
         "Sexy MILF",
     ],
     "title"     : "British beauty Danielle flashes hot breasts, ass and snatch in the forest",
@@ -67,7 +71,6 @@ __tests__ = (
     ],
     "categories": [
         "Outdoor",
-        "Asian",
         "Pornstar",
         "Brunette",
         "Blonde",
@@ -77,8 +80,8 @@ __tests__ = (
         "Fame Digital",
     ],
     "tags"      : [
+        "Nudist",
         "Nature",
-        "Asian Outdoor",
     ],
 },
 
@@ -140,6 +143,57 @@ __tests__ = (
     "#url"     : "https://pornpics.com/pt/pornstars/emma-brown",
     "#category": ("", "pornpics", "search"),
     "#class"   : pornpics.PornpicsSearchExtractor,
+},
+
+{
+    "#url"     : "https://www.pornpics.com/pornstars/paige-turnah/",
+    "#comment" : "results have less than 20 items per batch (#9022)",
+    "#class"   : pornpics.PornpicsSearchExtractor,
+    "#pattern" : pornpics.PornpicsGalleryExtractor.pattern,
+    "#range"   : "1-75",
+    "#count"   : 75,
+},
+
+{
+    "#url"     : "https://www.pornpics.com/ass/",
+    "#category": ("", "pornpics", "category"),
+    "#class"   : pornpics.PornpicsCategoryExtractor,
+    "#pattern" : pornpics.PornpicsGalleryExtractor.pattern,
+    "#range"   : "1-50",
+    "#count"   : 50,
+},
+
+{
+    "#url"     : "https://www.pornpics.com/milf/",
+    "#category": ("", "pornpics", "category"),
+    "#class"   : pornpics.PornpicsCategoryExtractor,
+},
+
+{
+    "#url"     : "https://pornpics.com/de/blonde",
+    "#category": ("", "pornpics", "category"),
+    "#class"   : pornpics.PornpicsCategoryExtractor,
+},
+
+{
+    "#url"     : "https://www.pornpics.com/popular/",
+    "#category": ("", "pornpics", "listing"),
+    "#class"   : pornpics.PornpicsListingExtractor,
+    "#pattern" : pornpics.PornpicsGalleryExtractor.pattern,
+    "#range"   : "1-20",
+    "#count"   : 20,
+},
+
+{
+    "#url"     : "https://www.pornpics.com/recent/",
+    "#category": ("", "pornpics", "listing"),
+    "#class"   : pornpics.PornpicsListingExtractor,
+},
+
+{
+    "#url"     : "https://pornpics.com/fr/rating",
+    "#category": ("", "pornpics", "listing"),
+    "#class"   : pornpics.PornpicsListingExtractor,
 },
 
 )

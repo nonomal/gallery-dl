@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2019-2023 Mike Fährmann
+# Copyright 2019-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,8 +9,7 @@
 """Extractors for Mastodon instances"""
 
 from .common import BaseExtractor, Message
-from .. import text, exception
-from ..cache import cache
+from .. import text
 
 
 class MastodonExtractor(BaseExtractor):
@@ -19,11 +18,10 @@ class MastodonExtractor(BaseExtractor):
     directory_fmt = ("mastodon", "{instance}", "{account[username]}")
     filename_fmt = "{category}_{id}_{media[id]}.{extension}"
     archive_fmt = "{media[id]}"
-    cookies_domain = None
 
     def __init__(self, match):
         BaseExtractor.__init__(self, match)
-        self.item = match.group(match.lastindex)
+        self.item = self.groups[-1]
 
     def _init(self):
         self.instance = self.root.partition("://")[2]
@@ -50,10 +48,8 @@ class MastodonExtractor(BaseExtractor):
                 attachments.extend(status["reblog"]["media_attachments"])
 
             if self.cards:
-                card = status.get("card")
-                if card:
-                    url = card.get("image")
-                    if url:
+                if card := status.get("card"):
+                    if url := card.get("image"):
                         card["weburl"] = card.get("url")
                         card["url"] = url
                         card["id"] = "card" + "".join(
@@ -67,10 +63,9 @@ class MastodonExtractor(BaseExtractor):
 
             status["count"] = len(attachments)
             status["tags"] = [tag["name"] for tag in status["tags"]]
-            status["date"] = text.parse_datetime(
-                status["created_at"][:19], "%Y-%m-%dT%H:%M:%S")
+            status["date"] = self.parse_datetime_iso(status["created_at"][:19])
 
-            yield Message.Directory, status
+            yield Message.Directory, "", status
             for status["num"], media in enumerate(attachments, 1):
                 status["media"] = media
                 url = media["url"]
@@ -197,10 +192,15 @@ class MastodonFollowingExtractor(MastodonExtractor):
 class MastodonStatusExtractor(MastodonExtractor):
     """Extractor for images from a status"""
     subcategory = "status"
-    pattern = BASE_PATTERN + r"/@[^/?#]+/(?!following)([^/?#]+)"
+    pattern = (BASE_PATTERN + r"/(?:@[^/?#]+|(?:users/[^/?#]+/)?"
+               r"(?:statuses|notice|objects()))/(?!following)([^/?#]+)")
     example = "https://mastodon.social/@USER/12345"
 
     def statuses(self):
+        if self.groups[-2] is not None:
+            url = f"{self.root}/objects/{self.item}"
+            location = self.request_location(url)
+            self.item = location.rpartition("/")[2]
         return (MastodonAPI(self).status(self.item),)
 
 
@@ -214,10 +214,12 @@ class MastodonAPI():
     def __init__(self, extractor):
         self.root = extractor.root
         self.extractor = extractor
+        self.exc = extractor.exc
 
         access_token = extractor.config("access-token")
         if access_token is None or access_token == "cache":
-            access_token = _access_token_cache(extractor.instance)
+            access_token = self.extractor.cache(
+                _access_token_cache, extractor.instance, _mem=False)
         if not access_token:
             access_token = extractor.config_instance("access-token")
 
@@ -239,13 +241,13 @@ class MastodonAPI():
         if "@" in username:
             handle = "@" + username
         else:
-            handle = "@{}@{}".format(username, self.extractor.instance)
+            handle = f"@{username}@{self.extractor.instance}"
 
         for account in self.account_search(handle, 1):
             if account["acct"] == username:
                 self.extractor._check_moved(account)
                 return account["id"]
-        raise exception.NotFoundError("account")
+        raise self.exc.NotFoundError("account")
 
     def account_bookmarks(self):
         """Statuses the user has bookmarked"""
@@ -259,7 +261,7 @@ class MastodonAPI():
 
     def account_following(self, account_id):
         """Accounts which the given account is following"""
-        endpoint = "/v1/accounts/{}/following".format(account_id)
+        endpoint = f"/v1/accounts/{account_id}/following"
         return self._pagination(endpoint, None)
 
     def account_lookup(self, username):
@@ -277,7 +279,7 @@ class MastodonAPI():
     def account_statuses(self, account_id, only_media=True,
                          exclude_replies=False):
         """Statuses posted to the given account"""
-        endpoint = "/v1/accounts/{}/statuses".format(account_id)
+        endpoint = f"/v1/accounts/{account_id}/statuses"
         params = {"only_media"     : "true" if only_media else "false",
                   "exclude_replies": "true" if exclude_replies else "false"}
         return self._pagination(endpoint, params)
@@ -311,19 +313,16 @@ class MastodonAPI():
             if code < 400:
                 return response
             if code == 401:
-                raise exception.StopExtraction(
-                    "Invalid or missing access token.\n"
-                    "Run 'gallery-dl oauth:mastodon:%s' to obtain one.",
-                    self.extractor.instance)
+                raise self.exc.AbortExtraction(
+                    f"Invalid or missing access token.\nRun 'gallery-dl oauth:"
+                    f"mastodon:{self.extractor.instance}' to obtain one.")
             if code == 404:
-                raise exception.NotFoundError()
+                raise self.exc.NotFoundError()
             if code == 429:
-                self.extractor.wait(until=text.parse_datetime(
-                    response.headers["x-ratelimit-reset"],
-                    "%Y-%m-%dT%H:%M:%S.%fZ",
-                ))
+                self.extractor.wait(until=self.extractor.parse_datetime_iso(
+                    response.headers["x-ratelimit-reset"]))
                 continue
-            raise exception.StopExtraction(response.json().get("error"))
+            raise self.exc.AbortExtraction(response.json().get("error"))
 
     def _pagination(self, endpoint, params):
         url = endpoint
@@ -338,6 +337,5 @@ class MastodonAPI():
             params = None
 
 
-@cache(maxage=36500*86400, keyarg=0)
 def _access_token_cache(instance):
     return None

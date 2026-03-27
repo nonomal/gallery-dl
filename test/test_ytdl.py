@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright 2022-2023 Mike Fährmann
+# Copyright 2022-2025 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -12,7 +12,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from gallery_dl import ytdl, util, config  # noqa E402
+from gallery_dl import ytdl, util, config, exception  # noqa E402
+from gallery_dl.extractor.ytdl import YoutubeDLExtractor  # noqa E402
 
 
 class Test_CommandlineArguments(unittest.TestCase):
@@ -22,10 +23,11 @@ class Test_CommandlineArguments(unittest.TestCase):
     def setUpClass(cls):
         try:
             cls.module = __import__(cls.module_name)
-        except ImportError:
-            raise unittest.SkipTest("cannot import module '{}'".format(
-                cls.module_name))
+        except (ImportError, SyntaxError):
+            raise unittest.SkipTest(
+                f"cannot import module '{cls.module_name}'")
         cls.default = ytdl.parse_command_line(cls.module, [])
+        cls.ytdlp = hasattr(cls.module, "cookies")
 
     def test_ignore_errors(self):
         self._("--ignore-errors" , "ignoreerrors", True)
@@ -41,8 +43,6 @@ class Test_CommandlineArguments(unittest.TestCase):
     def test_proxy(self):
         self._(["--proxy", "socks5://127.0.0.1:1080/"],
                "proxy", "socks5://127.0.0.1:1080/")
-        self._(["--cn-verification-proxy", "https://127.0.0.1"],
-               "cn_verification_proxy", "https://127.0.0.1")
         self._(["--geo-verification-proxy", "127.0.0.1"],
                "geo_verification_proxy", "127.0.0.1")
 
@@ -104,7 +104,10 @@ class Test_CommandlineArguments(unittest.TestCase):
                "geo_bypass_ip_block", "198.51.100.14/24")
 
     def test_headers(self):
-        headers = self.module.std_headers
+        try:
+            headers = self.module.utils.networking.std_headers
+        except AttributeError:
+            headers = self.module.std_headers
 
         self.assertNotEqual(headers["User-Agent"], "Foo/1.0")
         self._(["--user-agent", "Foo/1.0"])
@@ -155,21 +158,21 @@ class Test_CommandlineArguments(unittest.TestCase):
     def test_subs(self):
         opts = self._(["--convert-subs", "srt"])
         conv = {"key": "FFmpegSubtitlesConvertor", "format": "srt"}
-        if self.module_name == "yt_dlp":
+        if self.ytdlp:
             conv["when"] = "before_dl"
         self.assertEqual(opts["postprocessors"][0], conv)
 
     def test_embed(self):
         subs = {"key": "FFmpegEmbedSubtitle"}
         thumb = {"key": "EmbedThumbnail", "already_have_thumbnail": False}
-        if self.module_name == "yt_dlp":
+        if self.ytdlp:
             subs["already_have_subtitle"] = False
 
         opts = self._(["--embed-subs", "--embed-thumbnail"])
         self.assertEqual(opts["postprocessors"][:2], [subs, thumb])
 
         thumb["already_have_thumbnail"] = True
-        if self.module_name == "yt_dlp":
+        if self.ytdlp:
             subs["already_have_subtitle"] = True
             thumb["already_have_thumbnail"] = "all"
 
@@ -193,8 +196,6 @@ class Test_CommandlineArguments(unittest.TestCase):
         })
 
     def test_xattr(self):
-        self._("--xattr-set-filesize", "xattr_set_filesize", True)
-
         opts = self._("--xattrs")
         self.assertEqual(opts["postprocessors"][0], {"key": "XAttrMetadata"})
 
@@ -212,7 +213,7 @@ class Test_CommandlineArguments(unittest.TestCase):
             "--ignore-config",
         ]
 
-        if self.module_name != "yt_dlp":
+        if not self.ytdlp:
             cmdline.extend((
                 "--dump-json",
                 "--dump-single-json",
@@ -293,6 +294,82 @@ class Test_CommandlineArguments_YtDlp(Test_CommandlineArguments):
                "geo_bypass", "EN")
         self._(["--geo-bypass-ip-block", "198.51.100.14/24"],
                "geo_bypass", "198.51.100.14/24")
+
+    def test_cookiesfrombrowser(self):
+        self._(["--cookies-from-browser", "firefox"],
+               "cookiesfrombrowser", ("firefox", None, None, None))
+        self._(["--cookies-from-browser", "firefox:profile"],
+               "cookiesfrombrowser", ("firefox", "profile", None, None))
+        self._(["--cookies-from-browser", "firefox+keyring"],
+               "cookiesfrombrowser", ("firefox", None, "KEYRING", None))
+        self._(["--cookies-from-browser", "firefox::container"],
+               "cookiesfrombrowser", ("firefox", None, None, "container"))
+        self._(["--cookies-from-browser",
+                "firefox+keyring:profile::container"],
+               "cookiesfrombrowser",
+               ("firefox", "profile", "KEYRING", "container"))
+
+
+class MockYtdlModule:
+    class utils:
+        class YoutubeDLError(Exception):
+            pass
+
+
+class MockYtdlInstance:
+    def __init__(self, ignoreerrors):
+        self.params = {"ignoreerrors": ignoreerrors}
+
+
+class Test_YoutubeDLExtractor(unittest.TestCase):
+    def setUp(self):
+        class ExtractorMock(YoutubeDLExtractor):
+            def __init__(self):
+                self.exc = exception
+        self.extr = ExtractorMock.__new__(ExtractorMock)
+        self.extr.exc = exception
+
+    def test_process_entries_restart_propagation(self):
+        ytdl_module = MockYtdlModule()
+        ytdl_instance = MockYtdlInstance(ignoreerrors=False)
+
+        def mock_extract_info(url, dl, ie_key):
+            raise exception.RestartExtraction()
+        ytdl_instance.extract_info = mock_extract_info
+
+        entries = [{"_type": "url", "url": "test_url"}]
+        with self.assertRaises(exception.RestartExtraction):
+            list(self.extr._process_entries(
+                ytdl_module, ytdl_instance, entries))
+
+    def test_process_entries_ignoreerrors_true(self):
+        ytdl_module = MockYtdlModule()
+        ytdl_instance = MockYtdlInstance(ignoreerrors=True)
+
+        def mock_extract_info(url, dl, ie_key):
+            raise ytdl_module.utils.YoutubeDLError("Some Error")
+        ytdl_instance.extract_info = mock_extract_info
+
+        entries = [
+            {"_type": "url", "url": "test_url1"},
+            {"_type": "url", "url": "test_url2"}
+        ]
+        results = list(self.extr._process_entries(
+            ytdl_module, ytdl_instance, entries))
+        self.assertEqual(results, [])
+
+    def test_process_entries_ignoreerrors_false(self):
+        ytdl_module = MockYtdlModule()
+        ytdl_instance = MockYtdlInstance(ignoreerrors=False)
+
+        def mock_extract_info(url, dl, ie_key):
+            raise ytdl_module.utils.YoutubeDLError("Some Error")
+        ytdl_instance.extract_info = mock_extract_info
+
+        entries = [{"_type": "url", "url": "test_url"}]
+        with self.assertRaises(exception.AbortExtraction):
+            list(self.extr._process_entries(
+                ytdl_module, ytdl_instance, entries))
 
 
 if __name__ == "__main__":

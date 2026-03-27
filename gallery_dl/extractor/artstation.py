@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018-2023 Mike Fährmann
+# Copyright 2018-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,10 +9,8 @@
 """Extractors for https://www.artstation.com/"""
 
 from .common import Extractor, Message
-from .. import text, util, exception
+from .. import text, util
 import itertools
-import random
-import string
 
 
 class ArtstationExtractor(Extractor):
@@ -22,54 +20,40 @@ class ArtstationExtractor(Extractor):
     directory_fmt = ("{category}", "{userinfo[username]}")
     archive_fmt = "{asset[id]}"
     browser = "firefox"
+    tls12 = False
     root = "https://www.artstation.com"
 
     def __init__(self, match):
         Extractor.__init__(self, match)
-        self.user = match.group(1) or match.group(2)
+        self.user = match[1] or match[2]
+
+    def _init(self):
+        self.session.headers["Cache-Control"] = "max-age=0"
+        self.mviews = self.config("mviews", True)
+        self.videos = self.config("videos", True)
+        self.external = self.config("external", False)
+        self.previews = self.config("previews", False)
+        self.max_posts = self.config("max-posts")
 
     def items(self):
-        videos = self.config("videos", True)
-        previews = self.config("previews", False)
-        external = self.config("external", False)
-        max_posts = self.config("max-posts")
-
         data = self.metadata()
         projects = self.projects()
-        if max_posts:
-            projects = itertools.islice(projects, max_posts)
 
+        if self.max_posts:
+            projects = itertools.islice(projects, self.max_posts)
         for project in projects:
             for num, asset in enumerate(
                     self.get_project_assets(project["hash_id"]), 1):
                 asset.update(data)
                 adict = asset["asset"]
                 asset["num"] = num
-                yield Message.Directory, asset
+                yield Message.Directory, "", asset
 
                 if adict["has_embedded_player"]:
-                    player = adict["player_embedded"]
-                    url = (text.extr(player, 'src="', '"') or
-                           text.extr(player, "src='", "'"))
-                    if url.startswith(self.root):
-                        # video clip hosted on artstation
-                        if videos:
-                            page = self.request(url).text
-                            url = text.extr(page, ' src="', '"')
-                            text.nameext_from_url(url, asset)
-                            yield Message.Url, url, asset
-                    elif url:
-                        # external URL
-                        if external:
-                            asset["extension"] = "mp4"
-                            yield Message.Url, "ytdl:" + url, asset
-                    else:
-                        self.log.debug(player)
-                        self.log.warning(
-                            "Failed to extract embedded player URL (%s)",
-                            adict.get("id"))
-
-                    if not previews:
+                    if url := self._extract_embed(asset):
+                        text.nameext_from_url(url, asset)
+                        yield Message.Url, url, asset
+                    if not self.previews:
                         continue
 
                 if adict["has_image"]:
@@ -77,19 +61,52 @@ class ArtstationExtractor(Extractor):
                     text.nameext_from_url(url, asset)
 
                     url = self._no_cache(url)
-                    if "/video_clips/" not in url:
+                    if "/images/images/" in url:
                         lhs, _, rhs = url.partition("/large/")
                         if rhs:
-                            url = lhs + "/4k/" + rhs
+                            url = f"{lhs}/8k/{rhs}"
                             asset["_fallback"] = self._image_fallback(lhs, rhs)
 
                     yield Message.Url, url, asset
 
-    @staticmethod
-    def _image_fallback(lhs, rhs):
-        yield lhs + "/large/" + rhs
-        yield lhs + "/medium/" + rhs
-        yield lhs + "/small/" + rhs
+    def _extract_embed(self, asset):
+        adict = asset["asset"]
+        player = adict["player_embedded"]
+        url = (text.extr(player, 'src="', '"') or
+               text.extr(player, "src='", "'"))
+
+        if url.startswith(self.root):
+            # embed or video clip hosted on artstation
+            type = text.extr(adict.get("image_url", ""), "/assets/", "/")
+            if type == "marmosets":
+                if not self.mviews:
+                    return
+                page = self.request(url).text
+                return text.extr(page, "marmoset.embed(", '",').strip("\"' ")
+
+            elif type:
+                if not self.videos:
+                    return
+                page = self.request(url).text
+                return text.extract(
+                    page, ' src="', '"', page.find('id="video"')+1)[0]
+
+        if url:
+            # external URL
+            if not self.external:
+                return
+            asset["extension"] = "mp4"
+            return "ytdl:" + url
+
+        self.log.debug(player)
+        self.log.warning("Failed to extract embedded player URL (%s)",
+                         adict.get("id"))
+
+    def _image_fallback(self, lhs, rhs):
+        yield f"{lhs}/4k/{rhs}"
+        yield f"{lhs}/large/{rhs}"
+        yield f"{lhs}/medium/{rhs}"
+        yield f"{lhs}/small/{rhs}"
 
     def metadata(self):
         """Return general metadata"""
@@ -100,19 +117,18 @@ class ArtstationExtractor(Extractor):
 
     def get_project_assets(self, project_id):
         """Return all assets associated with 'project_id'"""
-        url = "{}/projects/{}.json".format(self.root, project_id)
+        url = f"{self.root}/projects/{project_id}.json"
 
         try:
-            data = self.request(url).json()
-        except exception.HttpError as exc:
+            data = self.request_json(url)
+        except self.exc.HttpError as exc:
             self.log.warning(exc)
             return
 
         data["title"] = text.unescape(data["title"])
         data["description"] = text.unescape(text.remove_html(
             data["description"]))
-        data["date"] = text.parse_datetime(
-            data["created_at"], "%Y-%m-%dT%H:%M:%S.%f%z")
+        data["date"] = self.parse_datetime_iso(data["created_at"])
 
         assets = data["assets"]
         del data["assets"]
@@ -128,7 +144,7 @@ class ArtstationExtractor(Extractor):
 
     def get_user_info(self, username):
         """Return metadata for a specific user"""
-        url = "{}/users/{}/quick.json".format(self.root, username.lower())
+        url = f"{self.root}/users/{username.lower()}/quick.json"
         response = self.request(url, notfound="user")
         return response.json()
 
@@ -151,7 +167,7 @@ class ArtstationExtractor(Extractor):
         params["page"] = 1
 
         while True:
-            data = self.request(url, **kwargs).json()
+            data = self.request_json(url, **kwargs)
             yield from data["data"]
 
             total += len(data["data"])
@@ -166,12 +182,10 @@ class ArtstationExtractor(Extractor):
             "Accept" : "*/*",
             "Origin" : self.root,
         }
-        return self.request(
-            url, method="POST", headers=headers, json={},
-        ).json()["public_csrf_token"]
+        return self.request_json(
+            url, method="POST", headers=headers, json={})["public_csrf_token"]
 
-    @staticmethod
-    def _no_cache(url, alphabet=(string.digits + string.ascii_letters)):
+    def _no_cache(self, url):
         """Cause a cache miss to prevent Cloudflare 'optimizations'
 
         Cloudflare's 'Polish' optimization strips image metadata and may even
@@ -183,10 +197,9 @@ class ArtstationExtractor(Extractor):
         https://github.com/r888888888/danbooru/issues/3528
         https://danbooru.donmai.us/forum_topics/14952
         """
-        param = "gallerydl_no_cache=" + util.bencode(
-            random.getrandbits(64), alphabet)
         sep = "&" if "?" in url else "?"
-        return url + sep + param
+        token = util.generate_token(8)
+        return url + sep + token[:4] + "=" + token[4:]
 
 
 class ArtstationUserExtractor(ArtstationExtractor):
@@ -198,7 +211,7 @@ class ArtstationUserExtractor(ArtstationExtractor):
     example = "https://www.artstation.com/USER"
 
     def projects(self):
-        url = "{}/users/{}/projects.json".format(self.root, self.user)
+        url = f"{self.root}/users/{self.user}/projects.json"
         params = {"album_id": "all"}
         return self._pagination(url, params)
 
@@ -216,7 +229,7 @@ class ArtstationAlbumExtractor(ArtstationExtractor):
 
     def __init__(self, match):
         ArtstationExtractor.__init__(self, match)
-        self.album_id = text.parse_int(match.group(3))
+        self.album_id = text.parse_int(match[3])
 
     def metadata(self):
         userinfo = self.get_user_info(self.user)
@@ -226,7 +239,7 @@ class ArtstationAlbumExtractor(ArtstationExtractor):
             if album["id"] == self.album_id:
                 break
         else:
-            raise exception.NotFoundError("album")
+            raise self.exc.NotFoundError("album")
 
         return {
             "userinfo": userinfo,
@@ -234,7 +247,7 @@ class ArtstationAlbumExtractor(ArtstationExtractor):
         }
 
     def projects(self):
-        url = "{}/users/{}/projects.json".format(self.root, self.user)
+        url = f"{self.root}/users/{self.user}/projects.json"
         params = {"album_id": self.album_id}
         return self._pagination(url, params)
 
@@ -249,7 +262,7 @@ class ArtstationLikesExtractor(ArtstationExtractor):
     example = "https://www.artstation.com/USER/likes"
 
     def projects(self):
-        url = "{}/users/{}/likes.json".format(self.root, self.user)
+        url = f"{self.root}/users/{self.user}/likes.json"
         return self._pagination(url)
 
 
@@ -265,19 +278,17 @@ class ArtstationCollectionExtractor(ArtstationExtractor):
 
     def __init__(self, match):
         ArtstationExtractor.__init__(self, match)
-        self.collection_id = match.group(2)
+        self.collection_id = match[2]
 
     def metadata(self):
-        url = "{}/collections/{}.json".format(
-            self.root, self.collection_id)
+        url = f"{self.root}/collections/{self.collection_id}.json"
         params = {"username": self.user}
-        collection = self.request(
-            url, params=params, notfound="collection").json()
+        collection = self.request_json(
+            url, params=params, notfound=True)
         return {"collection": collection, "user": self.user}
 
     def projects(self):
-        url = "{}/collections/{}/projects.json".format(
-            self.root, self.collection_id)
+        url = f"{self.root}/collections/{self.collection_id}/projects.json"
         params = {"collection_id": self.collection_id}
         return self._pagination(url, params)
 
@@ -293,10 +304,9 @@ class ArtstationCollectionsExtractor(ArtstationExtractor):
         url = self.root + "/collections.json"
         params = {"username": self.user}
 
-        for collection in self.request(
-                url, params=params, notfound="collections").json():
-            url = "{}/{}/collections/{}".format(
-                self.root, self.user, collection["id"])
+        for collection in self.request_json(
+                url, params=params, notfound=True):
+            url = f"{self.root}/{self.user}/collections/{collection['id']}"
             collection["_extractor"] = ArtstationCollectionExtractor
             yield Message.Queue, url, collection
 
@@ -309,42 +319,43 @@ class ArtstationChallengeExtractor(ArtstationExtractor):
                      "{challenge[id]} - {challenge[title]}")
     archive_fmt = "c_{challenge[id]}_{asset_id}"
     pattern = (r"(?:https?://)?(?:www\.)?artstation\.com"
-               r"/contests/[^/?#]+/challenges/(\d+)"
+               r"/c(?:hallenges|ontests)/[^/?#]+/c(?:ategori|halleng)es/(\d+)"
                r"/?(?:\?sorting=([a-z]+))?")
-    example = "https://www.artstation.com/contests/NAME/challenges/12345"
+    example = "https://www.artstation.com/challenges/NAME/categories/12345"
 
     def __init__(self, match):
         ArtstationExtractor.__init__(self, match)
-        self.challenge_id = match.group(1)
-        self.sorting = match.group(2) or "popular"
+        self.challenge_id = match[1]
+        self.sorting = match[2] or "popular"
 
     def items(self):
-        challenge_url = "{}/contests/_/challenges/{}.json".format(
-            self.root, self.challenge_id)
-        submission_url = "{}/contests/_/challenges/{}/submissions.json".format(
-            self.root, self.challenge_id)
-        update_url = "{}/contests/submission_updates.json".format(
-            self.root)
+        base = self.root + "/api/v2/competition/"
+        challenge_url = f"{base}challenges/{self.challenge_id}.json"
+        submission_url = base + "submissions.json"
 
-        challenge = self.request(challenge_url).json()
-        yield Message.Directory, {"challenge": challenge}
+        challenge = self.request_json(challenge_url)
+        yield Message.Directory, "", {"challenge": challenge}
 
-        params = {"sorting": self.sorting}
+        params = {
+            "page"        : 1,
+            "per_page"    : 50,
+            "challenge_id": self.challenge_id,
+            "sort_by"     : self.sorting,
+        }
+
         for submission in self._pagination(submission_url, params):
-
-            params = {"submission_id": submission["id"]}
+            update_url = (f"{base}submissions/{submission['id']}"
+                          f"/submission_updates.json")
+            params = {"page": 1, "per_page": 50}
             for update in self._pagination(update_url, params=params):
-
-                del update["replies"]
                 update["challenge"] = challenge
-                for url in text.extract_iter(
-                        update["body_presentation_html"], ' href="', '"'):
+                for url in util.unique_sequence(text.extract_iter(
+                        update["body"], ' href="', '"')):
                     update["asset_id"] = self._id_from_url(url)
                     text.nameext_from_url(url, update)
                     yield Message.Url, self._no_cache(url), update
 
-    @staticmethod
-    def _id_from_url(url):
+    def _id_from_url(self, url):
         """Get an image's submission ID from its URL"""
         parts = url.split("/")
         return text.parse_int("".join(parts[7:10]))
@@ -361,7 +372,7 @@ class ArtstationSearchExtractor(ArtstationExtractor):
 
     def __init__(self, match):
         ArtstationExtractor.__init__(self, match)
-        self.params = query = text.parse_query(match.group(1))
+        self.params = query = text.parse_query(match[1])
         self.query = text.unquote(query.get("query") or query.get("q", ""))
         self.sorting = query.get("sort_by", "relevance").lower()
         self.tags = query.get("tags", "").split(",")
@@ -383,7 +394,7 @@ class ArtstationSearchExtractor(ArtstationExtractor):
                     "value" : value.split(","),
                 })
 
-        url = "{}/api/v2/search/projects.json".format(self.root)
+        url = self.root + "/api/v2/search/projects.json"
         data = {
             "query"            : self.query,
             "page"             : None,
@@ -408,13 +419,13 @@ class ArtstationArtworkExtractor(ArtstationExtractor):
 
     def __init__(self, match):
         ArtstationExtractor.__init__(self, match)
-        self.query = text.parse_query(match.group(1))
+        self.query = text.parse_query(match[1])
 
     def metadata(self):
         return {"artwork": self.query}
 
     def projects(self):
-        url = "{}/projects.json".format(self.root)
+        url = self.root + "/projects.json"
         return self._pagination(url, self.query.copy())
 
 
@@ -428,7 +439,7 @@ class ArtstationImageExtractor(ArtstationExtractor):
 
     def __init__(self, match):
         ArtstationExtractor.__init__(self, match)
-        self.project_id = match.group(1)
+        self.project_id = match[1]
         self.assets = None
 
     def metadata(self):
@@ -455,8 +466,8 @@ class ArtstationFollowingExtractor(ArtstationExtractor):
     example = "https://www.artstation.com/USER/following"
 
     def items(self):
-        url = "{}/users/{}/following.json".format(self.root, self.user)
+        url = f"{self.root}/users/{self.user}/following.json"
         for user in self._pagination(url):
-            url = "{}/{}".format(self.root, user["username"])
+            url = f"{self.root}/{user['username']}"
             user["_extractor"] = ArtstationUserExtractor
             yield Message.Queue, url, user

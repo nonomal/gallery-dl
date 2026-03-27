@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017-2023 Mike Fährmann
+# Copyright 2017-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -8,7 +8,6 @@
 
 """Utility functions and classes"""
 
-import re
 import os
 import sys
 import json
@@ -17,14 +16,14 @@ import random
 import getpass
 import hashlib
 import binascii
-import datetime
 import functools
 import itertools
 import subprocess
+import collections
 import urllib.parse
 from http.cookiejar import Cookie
 from email.utils import mktime_tz, parsedate_tz
-from . import text, version, exception
+from . import text, dt, version, exception
 
 
 def bencode(num, alphabet="0123456789"):
@@ -42,9 +41,29 @@ def bdecode(data, alphabet="0123456789"):
     num = 0
     base = len(alphabet)
     for c in data:
-        num *= base
-        num += alphabet.index(c)
+        num = num * base + alphabet.find(c)
     return num
+
+
+def b36encode(num):
+    return bencode(num, "0123456789abcdefghijklmnopqrstuvwxyz")
+
+
+def b36decode(data):
+    return int(data, 36) if data else 0
+
+
+def decrypt_xor(encrypted, key, base64=True, fromhex=False):
+    if base64:
+        encrypted = binascii.a2b_base64(encrypted)
+    if fromhex:
+        encrypted = bytes.fromhex(encrypted.decode())
+
+    div = len(key)
+    return bytes([
+        encrypted[i] ^ key[i % div]
+        for i in range(len(encrypted))
+    ]).decode()
 
 
 def advance(iterable, num):
@@ -82,7 +101,7 @@ def unique_sequence(iterable):
 
 def contains(values, elements, separator=" "):
     """Returns True if at least one of 'elements' is contained in 'values'"""
-    if isinstance(values, str):
+    if isinstance(values, str) and (separator or separator is None):
         values = values.split(separator)
 
     if not isinstance(elements, (tuple, list)):
@@ -101,22 +120,22 @@ def raises(cls):
     return wrap
 
 
-def identity(x):
+def identity(x, _=None):
     """Returns its argument"""
     return x
 
 
-def true(_):
+def true(_, __=None):
     """Always returns True"""
     return True
 
 
-def false(_):
+def false(_, __=None):
     """Always returns False"""
     return False
 
 
-def noop():
+def noop(_=None):
     """Does nothing"""
 
 
@@ -140,18 +159,17 @@ def sha1(s):
 
 def generate_token(size=16):
     """Generate a random token with hexadecimal digits"""
-    data = random.getrandbits(size * 8).to_bytes(size, "big")
-    return binascii.hexlify(data).decode()
+    return random.getrandbits(size * 8).to_bytes(size, "big").hex()
 
 
 def format_value(value, suffixes="kMGTPEZY"):
-    value = format(value)
+    value = str(value)
     value_len = len(value)
     index = value_len - 4
     if index >= 0:
         offset = (value_len - 1) % 3 + 1
-        return (value[:offset] + "." + value[offset:offset+2] +
-                suffixes[index // 3])
+        return (f"{value[:offset]}.{value[offset:offset+2]}"
+                f"{suffixes[index // 3]}")
     return value
 
 
@@ -217,19 +235,6 @@ def to_string(value):
     return str(value)
 
 
-def datetime_to_timestamp(dt):
-    """Convert naive UTC datetime to timestamp"""
-    return (dt - EPOCH) / SECOND
-
-
-def datetime_to_timestamp_string(dt):
-    """Convert naive UTC datetime to timestamp string"""
-    try:
-        return str((dt - EPOCH) // SECOND)
-    except Exception:
-        return ""
-
-
 def json_default(obj):
     if isinstance(obj, CustomNone):
         return None
@@ -237,7 +242,11 @@ def json_default(obj):
 
 
 json_loads = json._default_decoder.decode
-json_dumps = json.JSONEncoder(default=json_default).encode
+json_dumps = json.JSONEncoder(
+    check_circular=False,
+    separators=(",", ":"),
+    default=json_default,
+).encode
 
 
 def dump_json(obj, fp=sys.stdout, ensure_ascii=True, indent=4):
@@ -259,7 +268,32 @@ def dump_response(response, fp, headers=False, content=True, hide_auth=True):
         request = response.request
         req_headers = request.headers.copy()
         res_headers = response.headers.copy()
-        outfmt = """\
+
+        if hide_auth:
+            if authorization := req_headers.get("Authorization"):
+                atype, sep, _ = str(authorization).partition(" ")
+                req_headers["Authorization"] = f"{atype} ***" if sep else "***"
+
+            if cookie := req_headers.get("Cookie"):
+                req_headers["Cookie"] = ";".join(
+                    c.partition("=")[0] + "=***"
+                    for c in cookie.split(";")
+                )
+
+            if set_cookie := res_headers.get("Set-Cookie"):
+                res_headers["Set-Cookie"] = re(r"(^|, )([^ =]+)=[^,;]*").sub(
+                    r"\1\2=***", set_cookie)
+
+        request_headers = "\n".join(
+            f"{name}: {value}"
+            for name, value in req_headers.items()
+        )
+        response_headers = "\n".join(
+            f"{name}: {value}"
+            for name, value in res_headers.items()
+        )
+
+        output = f"""\
 {request.method} {request.url}
 Status: {response.status_code} {response.reason}
 
@@ -268,49 +302,17 @@ Request Headers
 {request_headers}
 """
         if request.body:
-            outfmt += """
+            output = f"""{output}
 Request Body
 ------------
 {request.body}
 """
-        outfmt += """
+        output = f"""{output}
 Response Headers
 ----------------
 {response_headers}
 """
-        if hide_auth:
-            authorization = req_headers.get("Authorization")
-            if authorization:
-                atype, sep, _ = str(authorization).partition(" ")
-                req_headers["Authorization"] = atype + " ***" if sep else "***"
-
-            cookie = req_headers.get("Cookie")
-            if cookie:
-                req_headers["Cookie"] = ";".join(
-                    c.partition("=")[0] + "=***"
-                    for c in cookie.split(";")
-                )
-
-            set_cookie = res_headers.get("Set-Cookie")
-            if set_cookie:
-                res_headers["Set-Cookie"] = re.sub(
-                    r"(^|, )([^ =]+)=[^,;]*", r"\1\2=***", set_cookie,
-                )
-
-        fmt_nv = "{}: {}".format
-
-        fp.write(outfmt.format(
-            request=request,
-            response=response,
-            request_headers="\n".join(
-                fmt_nv(name, value)
-                for name, value in req_headers.items()
-            ),
-            response_headers="\n".join(
-                fmt_nv(name, value)
-                for name, value in res_headers.items()
-            ),
-        ).encode())
+        fp.write(output.encode())
 
     if content:
         if headers:
@@ -322,17 +324,39 @@ def extract_headers(response):
     headers = response.headers
     data = dict(headers)
 
-    hcd = headers.get("content-disposition")
-    if hcd:
-        name = text.extr(hcd, 'filename="', '"')
-        if name:
+    if hcd := headers.get("content-disposition"):
+        if name := text.extr(hcd, 'filename="', '"'):
             text.nameext_from_url(name, data)
 
-    hlm = headers.get("last-modified")
-    if hlm:
-        data["date"] = datetime.datetime(*parsedate_tz(hlm)[:6])
+    if hlm := headers.get("last-modified"):
+        data["date"] = dt.datetime(*parsedate_tz(hlm)[:6])
 
     return data
+
+
+def detect_challenge(response):
+    server = response.headers.get("server")
+    if not server:
+        return
+
+    elif server.startswith("cloudflare"):
+        if response.status_code not in (403, 503):
+            return
+
+        mitigated = response.headers.get("cf-mitigated")
+        if mitigated and mitigated.lower() == "challenge":
+            return "Cloudflare challenge"
+
+        content = response.content
+        if b"_cf_chl_opt" in content or b"jschl-answer" in content:
+            return "Cloudflare challenge"
+        elif b'name="captcha-bypass"' in content:
+            return "Cloudflare CAPTCHA"
+
+    elif server.startswith("ddos-guard"):
+        if response.status_code == 403 and \
+                b"/ddos-guard/js-challenge/" in response.content:
+            return "DDoS-Guard challenge"
 
 
 @functools.lru_cache(maxsize=None)
@@ -356,7 +380,9 @@ def expand_path(path):
     if not path:
         return path
     if not isinstance(path, str):
-        path = os.path.join(*path)
+        import logging
+        logging.getLogger("gallery-dl").error(
+            "Non-string paths are no longer supported.")
     return os.path.expandvars(os.path.expanduser(path))
 
 
@@ -383,9 +409,9 @@ def set_mtime(path, mtime):
         pass
 
 
-def cookiestxt_load(fp, cookiejar):
-    """Parse a Netscape cookies.txt file and add its Cookies to 'cookiejar'"""
-    set_cookie = cookiejar.set_cookie
+def cookiestxt_load(fp):
+    """Parse a Netscape cookies.txt file and add return its Cookies"""
+    cookies = []
 
     for line in fp:
 
@@ -407,23 +433,24 @@ def cookiestxt_load(fp, cookiejar):
             name = value
             value = None
 
-        set_cookie(Cookie(
+        cookies.append(Cookie(
             0, name, value,
             None, False,
             domain,
             domain_specified == "TRUE",
-            domain.startswith("."),
+            domain[0] == "." if domain else False,
             path, False,
             secure == "TRUE",
             None if expires == "0" or not expires else expires,
             False, None, None, {},
         ))
 
+    return cookies
+
 
 def cookiestxt_store(fp, cookies):
     """Write 'cookies' in Netscape cookies.txt format to 'fp'"""
-    write = fp.write
-    write("# Netscape HTTP Cookie File\n\n")
+    fp.write("# Netscape HTTP Cookie File\n\n")
 
     for cookie in cookies:
         if not cookie.domain:
@@ -436,15 +463,16 @@ def cookiestxt_store(fp, cookies):
             name = cookie.name
             value = cookie.value
 
-        write("\t".join((
-            cookie.domain,
-            "TRUE" if cookie.domain.startswith(".") else "FALSE",
-            cookie.path,
-            "TRUE" if cookie.secure else "FALSE",
-            "0" if cookie.expires is None else str(cookie.expires),
-            name,
-            value + "\n",
-        )))
+        domain = cookie.domain
+        fp.write(
+            f"{domain}\t"
+            f"{'TRUE' if domain and domain[0] == '.' else 'FALSE'}\t"
+            f"{cookie.path}\t"
+            f"{'TRUE' if cookie.secure else 'FALSE'}\t"
+            f"{'0' if cookie.expires is None else str(cookie.expires)}\t"
+            f"{name}\t"
+            f"{value}\n"
+        )
 
 
 def code_to_language(code, default=None):
@@ -466,6 +494,7 @@ def language_to_code(lang, default=None):
 CODES = {
     "ar": "Arabic",
     "bg": "Bulgarian",
+    "bn": "Bengali",
     "ca": "Catalan",
     "cs": "Czech",
     "da": "Danish",
@@ -473,9 +502,11 @@ CODES = {
     "el": "Greek",
     "en": "English",
     "es": "Spanish",
+    "fa": "Persian",
     "fi": "Finnish",
     "fr": "French",
     "he": "Hebrew",
+    "hi": "Hindi",
     "hu": "Hungarian",
     "id": "Indonesian",
     "it": "Italian",
@@ -488,25 +519,45 @@ CODES = {
     "pt": "Portuguese",
     "ro": "Romanian",
     "ru": "Russian",
+    "sk": "Slovak",
+    "sl": "Slovenian",
+    "sr": "Serbian",
     "sv": "Swedish",
     "th": "Thai",
     "tr": "Turkish",
+    "uk": "Ukrainian",
     "vi": "Vietnamese",
     "zh": "Chinese",
 }
 
 
-class HTTPBasicAuth():
-    __slots__ = ("authorization",)
+def HTTPBasicAuth(username, password, type=b"Basic"):
+    authorization = type + b" " + binascii.b2a_base64(
+        f"{username}:{password}".encode("latin1"), newline=False)
+    del username, password
 
-    def __init__(self, username, password):
-        self.authorization = b"Basic " + binascii.b2a_base64(
-            username.encode("latin1") + b":" + str(password).encode("latin1")
-        )[:-1]
-
-    def __call__(self, request):
-        request.headers["Authorization"] = self.authorization
+    def _apply(request):
+        request.headers["Authorization"] = authorization
         return request
+    return _apply
+
+
+class ModuleProxy():
+    __slots__ = ()
+
+    def __getitem__(self, key, modules=sys.modules):
+        try:
+            return modules[key]
+        except KeyError:
+            pass
+        try:
+            __import__(key)
+        except ImportError:
+            modules[key] = NONE
+            return NONE
+        return modules[key]
+
+    __getattr__ = __getitem__
 
 
 class LazyPrompt():
@@ -516,65 +567,193 @@ class LazyPrompt():
         return getpass.getpass()
 
 
+class NullContext():
+    __slots__ = ()
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+
+class NullResponse():
+    __slots__ = ("url", "reason")
+
+    ok = is_redirect = is_permanent_redirect = False
+    cookies = headers = history = links = {}
+    encoding = apparent_encoding = "utf-8"
+    content = b""
+    text = ""
+    status_code = 900
+    close = noop
+
+    def __init__(self, url, reason=""):
+        self.url = url
+        self.reason = str(reason)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+    def __str__(self):
+        return "900 " + self.reason
+
+    def json(self):
+        return {}
+
+
 class CustomNone():
     """None-style type that supports more operations than regular None"""
     __slots__ = ()
 
-    def __getattribute__(self, _):
-        return self
-
-    def __getitem__(self, _):
-        return self
-
-    def __iter__(self):
-        return self
+    __getattribute__ = identity
+    __getitem__ = identity
+    __iter__ = identity
 
     def __call__(self, *args, **kwargs):
         return self
 
-    @staticmethod
-    def __next__():
+    def __next__(self):
         raise StopIteration
 
-    @staticmethod
-    def __bool__():
-        return False
+    def __eq__(self, other):
+        return other is self or other is None
 
-    @staticmethod
-    def __len__():
+    def __ne__(self, other):
+        return other is not self and other is not None
+
+    __lt__ = true
+    __le__ = true
+    __gt__ = false
+    __ge__ = false
+    __bool__ = false
+
+    __add__ = identity
+    __sub__ = identity
+    __mul__ = identity
+    __matmul__ = identity
+    __truediv__ = identity
+    __floordiv__ = identity
+    __mod__ = identity
+
+    __radd__ = identity
+    __rsub__ = identity
+    __rmul__ = identity
+    __rmatmul__ = identity
+    __rtruediv__ = identity
+    __rfloordiv__ = identity
+    __rmod__ = identity
+
+    __lshift__ = identity
+    __rshift__ = identity
+    __and__ = identity
+    __xor__ = identity
+    __or__ = identity
+
+    __rlshift__ = identity
+    __rrshift__ = identity
+    __rand__ = identity
+    __rxor__ = identity
+    __ror__ = identity
+
+    __neg__ = identity
+    __pos__ = identity
+    __abs__ = identity
+    __invert__ = identity
+
+    def __len__(self):
         return 0
 
-    @staticmethod
-    def __format__(_):
+    __int__ = __len__
+    __hash__ = __len__
+    __index__ = __len__
+
+    def __format__(self, _):
         return "None"
 
-    @staticmethod
-    def __str__():
+    def __str__(self):
         return "None"
 
     __repr__ = __str__
 
 
+class Flags():
+
+    def __init__(self):
+        self.FILE = self.POST = self.CHILD = self.DOWNLOAD = None
+
+    def process(self, flag):
+        value = self.__dict__[flag]
+        if value is False:  # flag was set to "skip"
+            if flag == "DOWNLOAD":
+                self.DOWNLOAD = None
+                raise exception.StopDownload()
+            return "skip"
+        self.__dict__[flag] = None
+
+        if value == "abort":
+            raise exception.AbortExtraction()
+        if value == "terminate":
+            raise exception.TerminateExtraction()
+        if value == "restart":
+            raise exception.RestartExtraction()
+        raise exception.StopExtraction()
+
+
+# v137.0 release of Firefox on 2025-04-01 has ordinal 739342
+# 735506 == 739342 - 137 * 28
+# v135.0 release of Chrome  on 2025-04-01 has ordinal 739342
+# 735562 == 739342 - 135 * 28
+#  _ord_today = dt.date.today().toordinal()
+#  _ff_ver = (_ord_today - 735506) // 28
+#  _ch_ver = (_ord_today - 735562) // 28
+
+_ord_today = dt.date.today().toordinal()
+_ff_ver = (_ord_today - 735_513) // 28  # 147 on 2026-01-13
+_ch_ver = (_ord_today - 735_599) // 28  # 143 on 2025-12-18
+
+re = text.re
+re_compile = text.re_compile
+
 NONE = CustomNone()
-EPOCH = datetime.datetime(1970, 1, 1)
-SECOND = datetime.timedelta(0, 1)
+FLAGS = Flags()
 WINDOWS = (os.name == "nt")
 SENTINEL = object()
-USERAGENT = "gallery-dl/" + version.__version__
 EXECUTABLE = getattr(sys, "frozen", False)
 SPECIAL_EXTRACTORS = {"oauth", "recursive", "generic"}
+
+EXTS_IMAGE = {"jpg", "jpeg", "png", "gif", "bmp", "svg", "psd", "ico",
+              "webp", "avif", "heic", "heif"}
+EXTS_VIDEO = {"mp4", "m4v", "mov", "webm", "mkv", "ogv", "flv", "avi", "wmv"}
+EXTS_ARCHIVE = {"zip", "rar", "7z", "tar", "gz", "bz2", "lzma", "xz"}
+
+USERAGENT_GALLERYDL = "gallery-dl/" + version.__version__
+USERAGENT_FIREFOX = (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64; "
+                     f"rv:{_ff_ver}.0) Gecko/20100101 Firefox/{_ff_ver}.0")
+USERAGENT_CHROME = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    f"Chrome/{_ch_ver}.0.0.0 Safari/537.36")
+
 GLOBALS = {
     "contains" : contains,
     "parse_int": text.parse_int,
     "urlsplit" : urllib.parse.urlsplit,
-    "datetime" : datetime.datetime,
-    "timedelta": datetime.timedelta,
+    "datetime" : dt.datetime,
+    "timedelta": dt.timedelta,
     "abort"    : raises(exception.StopExtraction),
+    "error"    : raises(exception.AbortExtraction),
     "terminate": raises(exception.TerminateExtraction),
     "restart"  : raises(exception.RestartExtraction),
     "hash_sha1": sha1,
     "hash_md5" : md5,
-    "re"       : re,
+    "std"      : ModuleProxy(),
+    "re"       : text.re_module,
+    "exts_image"  : EXTS_IMAGE,
+    "exts_video"  : EXTS_VIDEO,
+    "exts_archive": EXTS_ARCHIVE,
 }
 
 
@@ -597,17 +776,63 @@ if EXECUTABLE and hasattr(sys, "_MEIPASS"):
 
     del orig
 
-    class Popen(subprocess.Popen):
-        def __init__(self, args, **kwargs):
-            kwargs["env"] = _popen_env
-            subprocess.Popen.__init__(self, args, **kwargs)
+    def Popen(args, **kwargs):
+        kwargs["env"] = _popen_env
+        return subprocess.Popen(args, **kwargs)
 else:
     Popen = subprocess.Popen
 
 
-def compile_expression(expr, name="<expr>", globals=None):
+def compile_expression_raw(expr, name="<expr>", globals=None):
     code_object = compile(expr, name, "eval")
     return functools.partial(eval, code_object, globals or GLOBALS)
+
+
+def compile_expression_defaultdict(expr, name="<expr>", globals=None):
+    global GLOBALS_DEFAULT
+
+    if isinstance(__builtins__, dict):
+        # cpython
+        GLOBALS_DEFAULT = collections.defaultdict(lambda n=NONE: n, GLOBALS)
+    else:
+        # pypy3 - insert __builtins__ symbols into globals dict
+        GLOBALS_DEFAULT = collections.defaultdict(
+            lambda n=NONE: n, __builtins__.__dict__)
+        GLOBALS_DEFAULT.update(GLOBALS)
+
+    global compile_expression_defaultdict
+    compile_expression_defaultdict = compile_expression_defaultdict_impl
+    return compile_expression_defaultdict_impl(expr, name, globals)
+
+
+def compile_expression_defaultdict_impl(expr, name="<expr>", globals=None):
+    code_object = compile(expr, name, "eval")
+    return functools.partial(eval, code_object, globals or GLOBALS_DEFAULT)
+
+
+def compile_expression_tryexcept(expr, name="<expr>", globals=None):
+    code_object = compile(expr, name, "eval")
+    if globals is None:
+        globals = GLOBALS
+
+    def _eval(locals=None):
+        try:
+            return eval(code_object, globals, locals)
+        except exception.GalleryDLException:
+            raise
+        except Exception:
+            return NONE
+
+    return _eval
+
+
+compile_expression = compile_expression_tryexcept
+
+
+def compile_filter(expr, name="<filter>", globals=None):
+    if not isinstance(expr, str):
+        expr = f"({') and ('.join(expr)})"
+    return compile_expression(expr, name, globals)
 
 
 def import_file(path):
@@ -626,28 +851,27 @@ def import_file(path):
         finally:
             del sys.path[0]
     else:
-        return __import__(name)
+        return __import__(name.replace("-", "_"))
 
 
-def build_duration_func(duration, min=0.0):
-    if not duration:
-        if min:
-            return lambda: min
-        return None
+def build_selection_func(value, min=0.0, conv=float):
+    if not value:
+        return (lambda: min) if min else None
 
-    if isinstance(duration, str):
-        lower, _, upper = duration.partition("-")
-        lower = float(lower)
+    if isinstance(value, str):
+        lower, _, upper = value.partition("-")
     else:
         try:
-            lower, upper = duration
+            lower, upper = value
         except TypeError:
-            lower, upper = duration, None
+            lower = value
+            upper = None
+    lower = conv(lower)
 
     if upper:
-        upper = float(upper)
+        upper = conv(upper)
         return functools.partial(
-            random.uniform,
+            random.uniform if lower.__class__ is float else random.randint,
             lower if lower > min else min,
             upper if upper > min else min,
         )
@@ -655,6 +879,41 @@ def build_duration_func(duration, min=0.0):
         if lower < min:
             lower = min
         return lambda: lower
+
+
+build_duration_func = build_selection_func
+
+
+def build_duration_func_ex(value):
+    if not value:
+        return None
+    if not isinstance(value, str) or "=" not in value:
+        value = build_duration_func(value)
+        return lambda _: value()
+
+    args, _, value = value.partition("=")
+    type, _, args = args.partition(":")
+    value = build_duration_func(value)
+
+    if "exponential".startswith(type):
+        if not args:
+            return lambda n: value() * (2 ** (n-1))
+        base, _, start = args.partition(":")
+        start, _, max = start.partition(":")
+        start = float(start) if start else 0
+        base = float(base) if base else 2
+        max = int(max) if max else 3600
+        return lambda n: min(start + value() * (base ** (n-1)), max)
+
+    if "linear".startswith(type):
+        if not args:
+            return lambda n: value() * n
+        start, _, max = args.partition(":")
+        start = float(start) if start else 0
+        max = int(max) if max else 3600
+        return lambda n: min(start + value() * n, max)
+
+    raise ValueError("Invalid duration type " + repr(type))
 
 
 def build_extractor_filter(categories, negate=True, special=None):
@@ -703,8 +962,9 @@ def build_extractor_filter(categories, negate=True, special=None):
     if catsub:
         def test(extr):
             for category, subcategory in catsub:
-                if category in (extr.category, extr.basecategory) and \
-                        subcategory == extr.subcategory:
+                if subcategory == extr.subcategory and (
+                        category == extr.category or
+                        category == extr.basecategory):
                     return not negate
             return negate
         tests.append(test)
@@ -725,129 +985,263 @@ def build_proxy_map(proxies, log=None):
     if isinstance(proxies, str):
         if "://" not in proxies:
             proxies = "http://" + proxies.lstrip("/")
-        return {"http": proxies, "https": proxies}
-
-    if isinstance(proxies, dict):
+        proxies = {"http": proxies, "https": proxies}
+    elif isinstance(proxies, dict):
         for scheme, proxy in proxies.items():
             if "://" not in proxy:
                 proxies[scheme] = "http://" + proxy.lstrip("/")
-        return proxies
+    else:
+        proxies = None
 
-    if log:
-        log.warning("invalid proxy specifier: %s", proxies)
-
-
-def build_predicate(predicates):
-    if not predicates:
-        return lambda url, kwdict: True
-    elif len(predicates) == 1:
-        return predicates[0]
-    return functools.partial(chain_predicates, predicates)
-
-
-def chain_predicates(predicates, url, kwdict):
-    for pred in predicates:
-        if not pred(url, kwdict):
-            return False
-    return True
-
-
-class RangePredicate():
-    """Predicate; True if the current index is in the given range(s)"""
-
-    def __init__(self, rangespec):
-        self.ranges = ranges = self._parse(rangespec)
-        self.index = 0
-
-        if ranges:
-            # technically wrong, but good enough for now
-            # and evaluating min/max for a large range is slow
-            self.lower = min(r.start for r in ranges)
-            self.upper = max(r.stop for r in ranges) - 1
+    if log is not None:
+        if proxies is None:
+            log.warning("Invalid proxy specifier: %r", proxies)
         else:
-            self.lower = 0
-            self.upper = 0
+            log.debug("Proxy Map: %s", proxies)
 
-    def __call__(self, _url, _kwdict):
-        self.index = index = self.index + 1
-
-        if index > self.upper:
-            raise exception.StopExtraction()
-
-        for range in self.ranges:
-            if index in range:
-                return True
-        return False
-
-    @staticmethod
-    def _parse(rangespec):
-        """Parse an integer range string and return the resulting ranges
-
-        Examples:
-            _parse("-2,4,6-8,10-")      -> [(1,3), (4,5), (6,9), (10,INTMAX)]
-            _parse(" - 3 , 4-  4, 2-6") -> [(1,4), (4,5), (2,7)]
-            _parse("1:2,4:8:2")         -> [(1,1), (4,7,2)]
-        """
-        ranges = []
-        append = ranges.append
-
-        if isinstance(rangespec, str):
-            rangespec = rangespec.split(",")
-
-        for group in rangespec:
-            if not group:
-                continue
-
-            elif ":" in group:
-                start, _, stop = group.partition(":")
-                stop, _, step = stop.partition(":")
-                append(range(
-                    int(start) if start.strip() else 1,
-                    int(stop) if stop.strip() else sys.maxsize,
-                    int(step) if step.strip() else 1,
-                ))
-
-            elif "-" in group:
-                start, _, stop = group.partition("-")
-                append(range(
-                    int(start) if start.strip() else 1,
-                    int(stop) + 1 if stop.strip() else sys.maxsize,
-                ))
-
-            else:
-                start = int(group)
-                append(range(start, start+1))
-
-        return ranges
+    return proxies
 
 
-class UniquePredicate():
+def predicate_build(predicates):
+    if not predicates:
+        return true
+
+    if len(predicates) == 1:
+        return predicates[0]
+
+    def chain(url, kwdict):
+        for pred in predicates:
+            if not pred(url, kwdict):
+                return False
+        return True
+    return chain
+
+
+def predicate_unique():
     """Predicate; True if given URL has not been encountered before"""
-    def __init__(self):
-        self.urls = set()
-
-    def __call__(self, url, _):
+    def _pred(url, _):
         if url.startswith("text:"):
             return True
-        if url not in self.urls:
-            self.urls.add(url)
+        if url not in urls:
+            urls.add(url)
             return True
         return False
+    urls = set()
+    return _pred
 
 
-class FilterPredicate():
+def predicate_filter(expr, target="image"):
     """Predicate; True if evaluating the given expression returns True"""
-
-    def __init__(self, expr, target="image"):
-        if not isinstance(expr, str):
-            expr = "(" + ") and (".join(expr) + ")"
-        name = "<{} filter>".format(target)
-        self.expr = compile_expression(expr, name)
-
-    def __call__(self, _, kwdict):
+    def _pred(_, kwdict):
         try:
-            return self.expr(kwdict)
+            return expr(kwdict)
         except exception.GalleryDLException:
             raise
         except Exception as exc:
             raise exception.FilterError(exc)
+    expr = compile_filter(expr, f"<{target} filter>")
+    return _pred
+
+
+def predicate_tags(blacklist, negate=False):
+    def _pred(_, kwdict):
+        if not (tags := kwdict.get("tags") or kwdict.get("tag_string")):
+            return True
+
+        if isinstance(tags, str):
+            taglist = tags.split(", ")
+            if len(taglist) < len(tags) / 16:
+                taglist = tags.split(" ")
+            tags = taglist
+        elif isinstance(tags[0], dict):
+            # pixiv "tags": "original"
+            tags = [
+                tag
+                for tagdict in tags
+                for tag in tagdict.values()
+                if isinstance(tag, str)
+            ]
+
+        for tag in tags:
+            if tag in simple:
+                return negate
+        if complex is not None:
+            for check in complex:
+                if check(tags):
+                    return negate
+        return not negate
+    simple, complex = predicate_tags_parse(blacklist)
+    return _pred
+
+
+def predicate_tags_parse(blacklist):
+    if isinstance(blacklist, str):
+        try:
+            with open(expand_path(blacklist)) as fp:
+                blacklist = fp.readlines()
+        except OSError:
+            blacklist = blacklist.split(",")
+
+    simple = set()
+    complex = []
+
+    for line in blacklist:
+        line = line.strip()
+        if not line or line.startswith("# "):
+            # empty or comment
+            continue
+        line = line.lower()
+
+        if " " in line:
+            Or = []
+            And = []
+            for tag in line.split():
+                if tag[0] == "~":
+                    Or.append(tag[1:])
+                elif tag[0] == "-":
+                    And.append(predicate_tags_not(tag[1:]))
+                else:
+                    And.append(predicate_tags_in(tag))
+            if Or:
+                And.append("")
+                for tag in Or:
+                    And[-1] = predicate_tags_in(tag)
+                    complex.append(predicate_tags_chain(And.copy()))
+            else:
+                complex.append(predicate_tags_chain(And))
+
+        elif line[0] in "-~":
+            if line[0] == "~":
+                simple.add(line[1:])
+            else:
+                complex.append(predicate_tags_not(line[1:]))
+        else:
+            simple.add(line)
+
+    return simple, complex or None
+
+
+def predicate_tags_in(tag):
+    return lambda tags: tag in tags
+
+
+def predicate_tags_not(tag):
+    return lambda tags: tag not in tags
+
+
+def predicate_tags_chain(checks):
+    def chain(tags):
+        for check in checks:
+            if not check(tags):
+                return False
+        return True
+    return chain
+
+
+def predicate_date(before, after=None, skip=None):
+    if after is None:
+        if skip is not None and skip(before):
+            return true
+
+        def _pred(_, kwdict):
+            if (date := kwdict.get("date")) and date >= before:
+                return False
+            return True
+
+    elif before is None or after > before or skip is not None and skip(before):
+        def _pred(_, kwdict):
+            if (date := kwdict.get("date")) and date <= after:
+                raise exception.StopExtraction()
+            return True
+
+    else:
+        def _pred(_, kwdict):
+            if not (date := kwdict.get("date")):
+                return True
+            if date <= after:
+                raise exception.StopExtraction()
+            return date < before
+    return _pred
+
+
+def predicate_range(ranges, skip=None, flag=None):
+    """Predicate; True if the current index is in the given range(s)"""
+    if ranges := predicate_range_parse(ranges):
+        # technically wrong for 'step > 2', but good enough for now
+        # and evaluating min/max for a large range is slow
+        upper = max(r.stop for r in ranges) - 1
+        lower = min(r.start for r in ranges)
+        index = 0 if skip is None or lower <= 1 else skip(lower)
+        del lower
+    else:
+        index = upper = 0
+
+    if flag is None:
+        def _pred(_url, _kwdict):
+            nonlocal index
+
+            if index >= upper:
+                raise exception.StopExtraction()
+            index += 1
+
+            for range in ranges:
+                if index in range:
+                    return True
+            return False
+    else:
+        def _pred(_url, _kwdict):
+            nonlocal index
+
+            index += 1
+            if index >= upper:
+                if index > upper:
+                    raise exception.StopExtraction()
+                FLAGS.__dict__[flag.upper()] = "stop"
+
+            for range in ranges:
+                if index in range:
+                    return True
+            return False
+    return _pred
+
+
+def predicate_range_parse(rangespec):
+    """Parse an integer range string and return the resulting ranges
+
+    Examples:
+        _parse("-2,4,6-8,10-")      -> [(1,3), (4,5), (6,9), (10,INTMAX)]
+        _parse(" - 3 , 4-  4, 2-6") -> [(1,4), (4,5), (2,7)]
+        _parse("1:2,4:8:2")         -> [(1,1), (4,7,2)]
+    """
+    ranges = []
+
+    if isinstance(rangespec, str):
+        rangespec = rangespec.split(",")
+    elif isinstance(rangespec, int):
+        rangespec = (str(rangespec),)
+
+    for group in rangespec:
+        if not group:
+            continue
+
+        elif ":" in group:
+            start, _, stop = group.partition(":")
+            stop, _, step = stop.partition(":")
+            ranges.append(range(
+                int(start) if start.strip() else 1,
+                int(stop) if stop.strip() else sys.maxsize,
+                int(step) if step.strip() else 1,
+            ))
+
+        elif "-" in group:
+            start, _, stop = group.partition("-")
+            ranges.append(range(
+                int(start) if start.strip() else 1,
+                int(stop) + 1 if stop.strip() else sys.maxsize,
+            ))
+
+        else:
+            start = int(group)
+            ranges.append(range(start, start+1))
+
+    return ranges

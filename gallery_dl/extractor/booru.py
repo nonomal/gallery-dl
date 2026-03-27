@@ -27,18 +27,22 @@ class BooruExtractor(BaseExtractor):
         notes = self.config("notes", False)
         fetch_html = tags or notes
 
-        url_key = self.config("url")
-        if url_key:
-            self._file_url = operator.itemgetter(url_key)
+        if url_key := self.config("url"):
+            if isinstance(url_key, (list, tuple)):
+                self._file_url = self._file_url_list
+                self._file_url_keys = url_key
+            else:
+                self._file_url = operator.itemgetter(url_key)
 
         for post in self.posts():
             try:
                 url = self._file_url(post)
                 if url[0] == "/":
                     url = self.root + url
-            except (KeyError, TypeError):
-                self.log.debug("Unable to fetch download URL for post %s "
-                               "(md5: %s)", post.get("id"), post.get("md5"))
+            except Exception as exc:
+                self.log.debug("%s: %s", exc.__class__.__name__, exc)
+                self.log.warning("Unable to fetch download URL for post %s "
+                                 "(md5: %s)", post.get("id"), post.get("md5"))
                 continue
 
             if fetch_html:
@@ -48,14 +52,15 @@ class BooruExtractor(BaseExtractor):
                 if notes:
                     self._notes(post, html)
 
-            text.nameext_from_url(url, post)
+            if "extension" not in post:
+                text.nameext_from_url(url, post)
             post.update(data)
             self._prepare(post)
 
-            yield Message.Directory, post
+            yield Message.Directory, "", post
             yield Message.Url, url, post
 
-    def skip(self, num):
+    def skip_files(self, num):
         pages = num // self.per_page
         self.page_start += pages
         return pages * self.per_page
@@ -72,6 +77,11 @@ class BooruExtractor(BaseExtractor):
         return ()
 
     _file_url = operator.itemgetter("file_url")
+
+    def _file_url_list(self, post):
+        urls = (post[key] for key in self._file_url_keys if post.get(key))
+        post["_fallback"] = it = iter(urls)
+        return next(it)
 
     def _prepare(self, post):
         """Prepare a 'post's metadata"""

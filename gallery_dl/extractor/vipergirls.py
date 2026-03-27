@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2023 Mike Fährmann
+# Copyright 2023-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,10 +9,7 @@
 """Extractors for https://vipergirls.to/"""
 
 from .common import Extractor, Message
-from .. import text, util, exception
-from ..cache import cache
-
-from xml.etree import ElementTree
+from .. import text, util
 
 BASE_PATTERN = r"(?:https?://)?(?:www\.)?vipergirls\.to"
 
@@ -27,37 +24,62 @@ class VipergirlsExtractor(Extractor):
     cookies_names = ("vg_userid", "vg_password")
 
     def _init(self):
-        domain = self.config("domain")
-        if domain:
-            self.root = text.ensure_http_scheme(domain)
+        if domain := self.config("domain"):
+            pos = domain.find("://")
+            if pos >= 0:
+                self.root = domain.rstrip("/")
+                self.cookies_domain = "." + domain[pos+1:].strip("/")
+            else:
+                domain = domain.strip("/")
+                self.root = "https://" + domain
+                self.cookies_domain = "." + domain
+        else:
+            self.root = "https://viper.click"
+            self.cookies_domain = ".viper.click"
 
     def items(self):
         self.login()
-        posts = self.posts()
+        root = self.posts()
+        forum_title = root[1].attrib["title"]
+        thread_title = root[2].attrib["title"]
 
-        like = self.config("like")
-        if like:
-            user_hash = posts[0].get("hash")
+        if like := self.config("like"):
+            user_hash = root[0].get("hash")
             if len(user_hash) < 16:
                 self.log.warning("Login required to like posts")
                 like = False
 
-        posts = posts.iter("post")
-        if self.page:
-            util.advance(posts, (text.parse_int(self.page[5:]) - 1) * 15)
+        posts = root.iter("post")
+        if (order := self.config("order-posts")) and \
+                order[0] not in ("d", "r"):
+            if self.page:
+                util.advance(posts, (text.parse_int(self.page[5:]) - 1) * 15)
+        else:
+            posts = list(posts)
+            if self.page:
+                offset = text.parse_int(self.page[5:]) * 15
+                posts = posts[:offset]
+            posts.reverse()
 
         for post in posts:
+            images = list(post)
+
             data = post.attrib
+            data["forum_title"] = forum_title
             data["thread_id"] = self.thread_id
+            data["thread_title"] = thread_title
+            data["post_id"] = data.pop("id")
+            data["post_num"] = data.pop("number")
+            data["post_title"] = data.pop("title")
+            data["count"] = len(images)
+            del data["imagecount"]
 
-            yield Message.Directory, data
-
-            image = None
-            for image in post:
-                yield Message.Queue, image.attrib["main_url"], data
-
-            if image is not None and like:
-                self.like(post, user_hash)
+            yield Message.Directory, "", data
+            if images:
+                for data["num"], image in enumerate(images, 1):
+                    yield Message.Queue, image.attrib["main_url"], data
+                if like:
+                    self.like(post, user_hash)
 
     def login(self):
         if self.cookies_check(self.cookies_names):
@@ -65,13 +87,14 @@ class VipergirlsExtractor(Extractor):
 
         username, password = self._get_auth_info()
         if username:
-            self.cookies_update(self._login_impl(username, password))
+            return self.cookies_update(self.cache(
+                self._login_impl, username, password,
+                _exp=90*86400, _mem=False))
 
-    @cache(maxage=90*86400, keyarg=1)
     def _login_impl(self, username, password):
         self.log.info("Logging in as %s", username)
 
-        url = "{}/login.php?do=login".format(self.root)
+        url = self.root + "/login.php?do=login"
         data = {
             "vb_login_username": username,
             "vb_login_password": password,
@@ -81,7 +104,7 @@ class VipergirlsExtractor(Extractor):
 
         response = self.request(url, method="POST", data=data)
         if not response.cookies.get("vg_password"):
-            raise exception.AuthenticationError()
+            raise self.exc.AuthenticationError()
 
         return {cookie.name: cookie.value
                 for cookie in response.cookies}
@@ -101,7 +124,8 @@ class VipergirlsExtractor(Extractor):
 class VipergirlsThreadExtractor(VipergirlsExtractor):
     """Extractor for vipergirls threads"""
     subcategory = "thread"
-    pattern = BASE_PATTERN + r"/threads/(\d+)(?:-[^/?#]+)?(/page\d+)?$"
+    pattern = (BASE_PATTERN +
+               r"/threads/(\d+)(?:-[^/?#]+)?(/page\d+)?(?:$|#|\?(?!p=))")
     example = "https://vipergirls.to/threads/12345-TITLE"
 
     def __init__(self, match):
@@ -109,8 +133,8 @@ class VipergirlsThreadExtractor(VipergirlsExtractor):
         self.thread_id, self.page = match.groups()
 
     def posts(self):
-        url = "{}/vr.php?t={}".format(self.root, self.thread_id)
-        return ElementTree.fromstring(self.request(url).text)
+        url = f"{self.root}/vr.php?t={self.thread_id}"
+        return self.request_xml(url)
 
 
 class VipergirlsPostExtractor(VipergirlsExtractor):
@@ -126,5 +150,5 @@ class VipergirlsPostExtractor(VipergirlsExtractor):
         self.page = 0
 
     def posts(self):
-        url = "{}/vr.php?p={}".format(self.root, self.post_id)
-        return ElementTree.fromstring(self.request(url).text)
+        url = f"{self.root}/vr.php?p={self.post_id}"
+        return self.request_xml(url)

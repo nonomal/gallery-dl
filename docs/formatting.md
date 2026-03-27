@@ -1,8 +1,38 @@
 # String Formatting
 
+
+## Table of Contents
+
+* [Basics](#basics)
+* [Field Names](#field-names)
+* [Conversions](#conversions)
+* [Format Specifiers](#format-specifiers)
+* [Global Replacement Fields](#global-replacement-fields)
+* [Special Type Format Strings](#special-type-format-strings)
+
+
+## Basics
+
 Format strings in gallery-dl follow the general rules of [`str.format()`](https://docs.python.org/3/library/string.html#format-string-syntax) ([PEP 3101](https://www.python.org/dev/peps/pep-3101/)) plus several extras.
 
-The syntax for replacement fields is `{<field-name>!<conversion>:<format-specifiers>}`, where `!<conversion>` and `:<format-specifiers>` are both optional and can be used to specify how the value selected by `<field-name>` should be transformed.
+The syntax for replacement fields is
+```
+{<field-name>!<conversion>:<format-specifiers>}
+```
+where
+[`<field-name>`](#field-names)
+selects a value
+<br>
+and the optional
+[`!<conversion>`](#conversions)
+&amp;
+[`:<format-specifiers>`](#format-specifiers)
+specify how to transform it.
+
+Examples:
+* `{title}`
+* `{content!W}`
+* `{date:Olocal/%Y%m%d %H%M}`
 
 
 ## Field Names
@@ -11,18 +41,59 @@ Field names select the metadata value to use in a replacement field.
 
 While simple names are usually enough, more complex forms like accessing values by attribute, element index, or slicing are also supported.
 
-|                      | Example             | Result                 |
-| -------------------- | ------------------- | ---------------------- |
-| Name                 | `{title}`           | `Hello World`          |
-| Element Index        | `{title[6]}`        | `W`                    |
-| Slicing              | `{title[3:8]}`      | `lo Wo`                |
-| Slicing (Bytes)      | `{title_ja[b3:18]}` | `ロー・ワー`           |
-| Alternatives         | `{empty\|title}`    | `Hello World`          |
-| Attribute Access     | `{extractor.url}`   | `https://example.org/` |
-| Element Access       | `{user[name]}`      | `John Doe`             |
-|                      | `{user['name']}`    | `John Doe`             |
+<table>
+<thead>
+<tr>
+    <th></th>
+    <th>Example</th>
+    <th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+    <td>Name</td>
+    <td><code>{title}</code></td>
+    <td><code>Hello World</code></td>
+</tr>
+<tr>
+    <td>Element Index</td>
+    <td><code>{title[6]}</code></td>
+    <td><code>W</code></td>
+</tr>
+<tr>
+    <td>Slicing</td>
+    <td><code>{title[3:8]}</code></td>
+    <td><code>lo Wo</code></td>
+</tr>
+<tr>
+    <td>Slicing (Bytes)</td>
+    <td><code>{title_ja[b3:18]}</code></td>
+    <td><code>ロー・ワー</code></td>
+</tr>
+<tr>
+    <td>Alternatives</td>
+    <td><code>{empty|title}</code></td>
+    <td><code>Hello World</code></td>
+</tr>
+<tr>
+    <td>Attribute Access</td>
+    <td><code>{extractor.url}</code></td>
+    <td><code>https://example.org/</code></td>
+</tr>
+<tr>
+    <td rowspan="2">Element Access</td>
+    <td><code>{user[name]}</code></td>
+    <td><code>John Doe</code></td>
+</tr>
+<tr>
+    <td><code>{user['name']}</code></td>
+    <td><code>John Doe</code></td>
+</tr>
+</tbody>
+</table>
 
-All of these methods can be combined as needed.
+All of these methods can be combined.
+<br>
 For example `{title[24]|empty|extractor.url[15:-1]}` would result in `.org`.
 
 
@@ -77,6 +148,24 @@ Conversion specifiers allow to *convert* the value to a different form or type. 
     <td><code>["sun", "tree", "water"]</code></td>
 </tr>
 <tr>
+    <td align="center"><code>L</code></td>
+    <td>Convert an <a href="https://en.wikipedia.org/wiki/ISO_639-1">ISO 639-1</a> language code to its full name</td>
+    <td><code>{lang!L}</code></td>
+    <td><code>English</code></td>
+</tr>
+<tr>
+    <td align="center"><code>n</code></td>
+    <td>Return the <a href="https://docs.python.org/3/library/functions.html#len" rel="nofollow">length</a> of a value</td>
+    <td><code>{foo!n}</code></td>
+    <td><code>7</code></td>
+</tr>
+<tr>
+    <td align="center"><code>W</code></td>
+    <td>Sanitize whitespace - Remove leading and trailing whitespace characters and replace <em>all</em> whitespace (sequences) with a single space <code> </code> character</td>
+    <td><code>{space!W}</code></td>
+    <td><code>Foo Bar</code></td>
+</tr>
+<tr>
     <td align="center"><code>t</code></td>
     <td>Trim a string, i.e. remove leading and trailing whitespace characters</td>
     <td><code>{bar!t}</code></td>
@@ -84,15 +173,33 @@ Conversion specifiers allow to *convert* the value to a different form or type. 
 </tr>
 <tr>
     <td align="center"><code>T</code></td>
-    <td>Convert a <code>datetime</code> object to a unix timestamp</td>
+    <td>Convert a <code>datetime</code> object to a Unix timestamp</td>
     <td><code>{date!T}</code></td>
     <td><code>1262304000</code></td>
 </tr>
 <tr>
     <td align="center"><code>d</code></td>
-    <td>Convert a unix timestamp to a <code>datetime</code> object</td>
+    <td>Convert a Unix timestamp to a <code>datetime</code> object</td>
     <td><code>{created!d}</code></td>
     <td><code>2010-01-01 00:00:00</code></td>
+</tr>
+<tr>
+    <td align="center"><code>D</code></td>
+    <td>Convert a Unix timestamp or <a href="https://en.wikipedia.org/wiki/ISO_8601">ISO 8601</a> string to a <code>datetime</code> object</td>
+    <td><code>{created!D}</code></td>
+    <td><code>2010-01-01 00:00:00</code></td>
+</tr>
+<tr>
+    <td align="center"><code>q</code></td>
+    <td><a href="https://docs.python.org/3/library/urllib.parse.html#urllib.parse.quote">URL-encode</a> a value</td>
+    <td><code>{jpn!q}</code></td>
+    <td><code>%E6%A3%AE</code></td>
+</tr>
+<tr>
+    <td align="center"><code>Q</code></td>
+    <td><a href="https://docs.python.org/3/library/urllib.parse.html#urllib.parse.unquote">URL-decode</a> a value</td>
+    <td><code>{jpn_url!Q}</code></td>
+    <td><code>森</code></td>
 </tr>
 <tr>
     <td align="center"><code>U</code></td>
@@ -107,6 +214,12 @@ Conversion specifiers allow to *convert* the value to a different form or type. 
     <td><code>foo &amp; bar</code></td>
 </tr>
 <tr>
+    <td align="center"><code>R</code></td>
+    <td>Extract URLs</td>
+    <td><code>{lorem!R}</code></td>
+    <td><code>["https://example.org/"]</code></td>
+</tr>
+<tr>
     <td align="center"><code>s</code></td>
     <td>Convert value to <a href="https://docs.python.org/3/library/stdtypes.html#text-sequence-type-str" rel="nofollow"><code>str</code></a></td>
     <td><code>{tags!s}</code></td>
@@ -114,19 +227,31 @@ Conversion specifiers allow to *convert* the value to a different form or type. 
 </tr>
 <tr>
     <td align="center"><code>S</code></td>
-    <td>Convert value to <code>str</code> while providing a human-readable representation for lists</td>
+    <td>Convert value to <a href="https://docs.python.org/3/library/stdtypes.html#text-sequence-type-str" rel="nofollow"><code>str</code></a> while providing a human-readable representation for lists</td>
     <td><code>{tags!S}</code></td>
     <td><code>sun, tree, water</code></td>
 </tr>
 <tr>
     <td align="center"><code>r</code></td>
-    <td>Convert value to <code>str</code> using <a href="https://docs.python.org/3/library/functions.html#repr" rel="nofollow"><code>repr()</code></a></td>
+    <td>Convert value to <a href="https://docs.python.org/3/library/stdtypes.html#text-sequence-type-str" rel="nofollow"><code>str</code></a> using <a href="https://docs.python.org/3/library/functions.html#repr" rel="nofollow"><code>repr()</code></a></td>
     <td></td>
     <td></td>
 </tr>
 <tr>
     <td align="center"><code>a</code></td>
-    <td>Convert value to <code>str</code> using <a href="https://docs.python.org/3/library/functions.html#ascii" rel="nofollow"><code>ascii()</code></a></td>
+    <td>Convert value to <a href="https://docs.python.org/3/library/stdtypes.html#text-sequence-type-str" rel="nofollow"><code>str</code></a> using <a href="https://docs.python.org/3/library/functions.html#ascii" rel="nofollow"><code>ascii()</code></a></td>
+    <td></td>
+    <td></td>
+</tr>
+<tr>
+    <td align="center"><code>i</code></td>
+    <td>Convert value to <a href="https://docs.python.org/3/library/functions.html#int"><code>int</code></a></td>
+    <td></td>
+    <td></td>
+</tr>
+<tr>
+    <td align="center"><code>f</code></td>
+    <td>Convert value to <a href="https://docs.python.org/3/library/functions.html#float"><code>float</code></a></td>
     <td></td>
     <td></td>
 </tr>
@@ -181,16 +306,64 @@ Format specifiers can be used for advanced formatting by using the options provi
     <td><code>long</code></td>
 </tr>
 <tr>
+    <td rowspan="2"><code>Lb&lt;maxlen&gt;/&lt;ext&gt;/</code></td>
+    <td rowspan="2">Same as <code>L</code>, but applies to the <a href="https://docs.python.org/3/library/stdtypes.html#bytes"><code>bytes()</code></a> representation of a string in <a href="https://docs.python.org/3/library/sys.html#sys.getfilesystemencoding">filesystem encoding</a></td>
+    <td><code>{foo_ja:Lb15/長い/}</code></td>
+    <td><code>フー・バー</code></td>
+</tr>
+<tr>
+    <td><code>{foo_ja:Lb8/長い/}</code></td>
+    <td><code>長い</code></td>
+</tr>
+<tr>
+    <td rowspan="2"><code>X&lt;maxlen&gt;/&lt;ext&gt;/</code></td>
+    <td rowspan="2">Limit output to <code>&lt;maxlen&gt;</code> characters. Cut output and add <code>&lt;ext&gt;</code> to its end if its length exceeds <code>&lt;maxlen&gt;</code></td>
+    <td><code>{foo:X15/&nbsp;.../}</code></td>
+    <td><code>Foo&nbsp;Bar</code></td>
+</tr>
+<tr>
+    <td><code>{foo:X6/&nbsp;.../}</code></td>
+    <td><code>Fo&nbsp;...</code></td>
+</tr>
+<tr>
+    <td rowspan="2"><code>Xb&lt;maxlen&gt;/&lt;ext&gt;/</code></td>
+    <td rowspan="2">Same as <code>X</code>, but applies to the <a href="https://docs.python.org/3/library/stdtypes.html#bytes"><code>bytes()</code></a> representation of a string in <a href="https://docs.python.org/3/library/sys.html#sys.getfilesystemencoding">filesystem encoding</a></td>
+    <td><code>{foo_ja:Xb15/〜/}</code></td>
+    <td><code>フー・バー</code></td>
+</tr>
+<tr>
+    <td><code>{foo_ja:Xb8/〜/}</code></td>
+    <td><code>フ〜</code></td>
+</tr>
+<tr>
     <td><code>J&lt;separator&gt;/</code></td>
     <td>Concatenates elements of a list with <code>&lt;separator&gt;</code> using <a href="https://docs.python.org/3/library/stdtypes.html#str.join" rel="nofollow"><code>str.join()</code></a></td>
     <td><code>{tags:J - /}</code></td>
     <td><code>sun - tree - water</code></td>
 </tr>
 <tr>
+    <td><code>M&lt;key&gt;/</code></td>
+    <td>Maps a list of objects to a list of corresponding values by looking up <code>&lt;key&gt;</code> in each object</td>
+    <td><code>{users:Mname/}</code></td>
+    <td><code>["John", "David", "Max"]</code></td>
+</tr>
+<tr>
     <td><code>R&lt;old&gt;/&lt;new&gt;/</code></td>
     <td>Replaces all occurrences of <code>&lt;old&gt;</code> with <code>&lt;new&gt;</code> using <a href="https://docs.python.org/3/library/stdtypes.html#str.replace" rel="nofollow"><code>str.replace()</code></a></td>
     <td><code>{foo:Ro/()/}</code></td>
     <td><code>F()()&nbsp;Bar</code></td>
+</tr>
+<tr>
+    <td><code>A&lt;op&gt;&lt;value&gt;/</code></td>
+    <td>Apply arithmetic operation <code>&lt;op&gt;</code> (<code>+</code>, <code>-</code>, <code>*</code>) to the current value</td>
+    <td><code>{num:A+1/}</code></td>
+    <td><code>"2"</code></td>
+</tr>
+<tr>
+    <td><code>C&lt;conversion(s)&gt;/</code></td>
+    <td>Apply <a href="#conversions">Conversions</a> to the current value</td>
+    <td><code>{tags:CSgc/}</code></td>
+    <td><code>"Sun-tree-water"</code></td>
 </tr>
 <tr>
     <td><code>S&lt;order&gt;/</code></td>
@@ -205,10 +378,20 @@ Format specifiers can be used for advanced formatting by using the options provi
     <td><code>2010-01-01 00:00:00</code></td>
 </tr>
 <tr>
-    <td><code>O&lt;offset&gt;/</code></td>
-    <td>Apply <code>&lt;offset&gt;</code> to a <code>datetime</code> object, either as <code>±HH:MM</code> or <code>local</code> for local UTC offset</td>
+    <td rowspan="2"><code>O&lt;offset&gt;/</code></td>
+    <td rowspan="2">Apply <code>&lt;offset&gt;</code> to a <code>datetime</code> object, either as <code>±HH:MM</code> or <code>local</code> for local UTC offset</td>
     <td><code>{date:O-06:30/}</code></td>
     <td><code>2009-12-31 17:30:00</code></td>
+</tr>
+<tr>
+    <td><code>{date:Olocal/}</code></td>
+    <td><code>2010-01-01 01:00:00</code></td>
+</tr>
+<tr>
+    <td><code>I</code></td>
+    <td>Return the current value as is.<br>Do not convert it to <code>str</code></td>
+    <td><code>{num:I}</code></td>
+    <td><code>1</code></td>
 </tr>
 </tbody>
 </table>
@@ -251,6 +434,12 @@ Replacement field names that are available in all format strings.
     <td><code>2022-08</code></td>
 </tr>
 <tr>
+    <td><code>_nul</code></td>
+    <td>Universal <code>null</code> value</td>
+    <td><code>{date|_nul:%Y-%m}</code></td>
+    <td><code>None</code></td>
+</tr>
+<tr>
     <td rowspan="2"><code>_lit</code></td>
     <td rowspan="2">String literals</td>
     <td><code>{_lit[foo]}</code></td>
@@ -278,14 +467,19 @@ Starting a format string with `\f<Type> ` allows to set a different format strin
 </thead>
 <tbody>
 <tr>
+    <td align="center"><code>E</code></td>
+    <td>An arbitrary Python expression</td>
+    <td><code>\fE title.upper().replace(' ', '-')</code></td>
+</tr>
+<tr>
     <td align="center"><code>F</code></td>
     <td>An <a href="https://docs.python.org/3/tutorial/inputoutput.html#formatted-string-literals">f-string</a> literal</td>
     <td><code>\fF '{title.strip()}' by {artist.capitalize()}</code></td>
 </tr>
 <tr>
-    <td align="center"><code>E</code></td>
-    <td>An arbitrary Python expression</td>
-    <td><code>\fE title.upper().replace(' ', '-')</code></td>
+    <td align="center"><code>J</code></td>
+    <td>A <a href="https://jinja.palletsprojects.com/">Jinja</a> template</td>
+    <td><code>\fJ '&#123;&#123;title | trim&#125;&#125;' by &#123;&#123;artist | capitalize&#125;&#125;</code></td>
 </tr>
 <tr>
     <td align="center"><code>T</code></td>
@@ -296,6 +490,11 @@ Starting a format string with `\f<Type> ` allows to set a different format strin
     <td align="center"><code>TF</code></td>
     <td>Path to a template file containing an <a href="https://docs.python.org/3/tutorial/inputoutput.html#formatted-string-literals">f-string</a> literal</td>
     <td><code>\fTF ~/.templates/fstr.txt</code></td>
+</tr>
+<tr>
+    <td align="center"><code>TJ</code></td>
+    <td>Path to a template file containing a <a href="https://jinja.palletsprojects.com/">Jinja</a> template</td>
+    <td><code>\fTF ~/.templates/jinja.txt</code></td>
 </tr>
 <tr>
     <td align="center"><code>M</code></td>

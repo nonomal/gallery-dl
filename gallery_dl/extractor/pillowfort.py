@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2021-2023 Mike Fährmann
+# Copyright 2021-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,9 +9,7 @@
 """Extractors for https://www.pillowfort.social/"""
 
 from .common import Extractor, Message
-from ..cache import cache
-from .. import text, exception
-import re
+from .. import text
 
 BASE_PATTERN = r"(?:https?://)?www\.pillowfort\.social"
 
@@ -28,7 +26,7 @@ class PillowfortExtractor(Extractor):
 
     def __init__(self, match):
         Extractor.__init__(self, match)
-        self.item = match.group(1)
+        self.item = match[1]
 
     def items(self):
         self.login()
@@ -37,8 +35,8 @@ class PillowfortExtractor(Extractor):
         external = self.config("external", False)
 
         if inline:
-            inline = re.compile(r'src="(https://img\d+\.pillowfort\.social'
-                                r'/posts/[^"]+)').findall
+            inline = text.re(r'src="(https://img\d+\.pillowfort\.social'
+                             r'/posts/[^"]+)').findall
 
         for post in self.posts():
             if "original_post" in post and not reblogs:
@@ -49,10 +47,10 @@ class PillowfortExtractor(Extractor):
                 for url in inline(post["content"]):
                     files.append({"url": url})
 
-            post["date"] = text.parse_datetime(
-                post["created_at"], "%Y-%m-%dT%H:%M:%S.%f%z")
+            post["date"] = self.parse_datetime_iso(post["created_at"])
             post["post_id"] = post.pop("id")
-            yield Message.Directory, post
+            post["count"] = len(files)
+            yield Message.Directory, "", post
 
             post["num"] = 0
             for file in files:
@@ -76,8 +74,7 @@ class PillowfortExtractor(Extractor):
                 if "id" not in file:
                     post["id"] = post["hash"]
                 if "created_at" in file:
-                    post["date"] = text.parse_datetime(
-                        file["created_at"], "%Y-%m-%dT%H:%M:%S.%f%z")
+                    post["date"] = self.parse_datetime_iso(file["created_at"])
 
                 yield msgtype, url, post
 
@@ -89,9 +86,10 @@ class PillowfortExtractor(Extractor):
 
         username, password = self._get_auth_info()
         if username:
-            self.cookies_update(self._login_impl(username, password))
+            return self.cookies_update(self.cache(
+                self._login_impl, username, password,
+                _exp=14*86400, _mem=False))
 
-    @cache(maxage=14*86400, keyarg=1)
     def _login_impl(self, username, password):
         self.log.info("Logging in as %s", username)
 
@@ -110,7 +108,7 @@ class PillowfortExtractor(Extractor):
         response = self.request(url, method="POST", headers=headers, data=data)
 
         if not response.history:
-            raise exception.AuthenticationError()
+            raise self.exc.AuthenticationError()
 
         return {
             cookie.name: cookie.value
@@ -125,8 +123,8 @@ class PillowfortPostExtractor(PillowfortExtractor):
     example = "https://www.pillowfort.social/posts/12345"
 
     def posts(self):
-        url = "{}/posts/{}/json/".format(self.root, self.item)
-        return (self.request(url).json(),)
+        url = f"{self.root}/posts/{self.item}/json/"
+        return (self.request_json(url),)
 
 
 class PillowfortUserExtractor(PillowfortExtractor):
@@ -136,11 +134,11 @@ class PillowfortUserExtractor(PillowfortExtractor):
     example = "https://www.pillowfort.social/USER"
 
     def posts(self):
-        url = "{}/{}/json/".format(self.root, self.item)
+        url = f"{self.root}/{self.item}/json/"
         params = {"p": 1}
 
         while True:
-            posts = self.request(url, params=params).json()["posts"]
+            posts = self.request_json(url, params=params)["posts"]
             yield from posts
 
             if len(posts) < 20:

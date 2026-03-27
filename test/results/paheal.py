@@ -16,17 +16,16 @@ __tests__ = (
     "#count"   : range(70, 200),
 
     "date"     : "type:datetime",
-    "extension": r"re:jpg|png",
+    "extension": {"jpg", "png"},
     "filename" : r"re:\d+ - \w+",
     "duration" : float,
     "height"   : int,
     "id"       : int,
-    "md5"      : r"re:[0-9a-f]{32}",
+    "md5"      : "hash:md5",
     "search_tags": "Ayane_Suzuki",
     "size"     : int,
     "tags"     : str,
     "width"    : int,
-
 },
 
 {
@@ -52,10 +51,45 @@ __tests__ = (
 },
 
 {
+    "#url"     : "https://rule34.paheal.net/post/list/Ranma_1%2F2/1",
+    "#comment" : "percent-encoded character in tag (#7642)",
+    "#category": ("shimmie2", "paheal", "tag"),
+    "#class"   : paheal.PahealTagExtractor,
+    "#range"   : "1-200",
+    "#count"   : 200,
+},
+
+{
+    "#url"     : "https://rule34.paheal.net/post/list/non_existant_tag/1",
+    "#category": ("shimmie2", "paheal", "tag"),
+    "#class"   : paheal.PahealTagExtractor,
+    "#count"   : 0,
+},
+
+{
+    "#url"     : "https://rule34.paheal.net/post/list/tien vira/1",
+    "#comment" : "tag with only 1 result (#9186)",
+    "#category": ("shimmie2", "paheal", "tag"),
+    "#class"   : paheal.PahealTagExtractor,
+    "#results" : "https://r34i.paheal-cdn.net/fc/3b/fc3b8ff79b0332907edda690725036e8",
+
+    "date"       : "dt:2025-06-06 10:09:13",
+    "extension"  : "png",
+    "width"      : 7972,
+    "height"     : 5154,
+    "size"       : 25165824,
+    "id"         : 6909357,
+    "md5"        : "fc3b8ff79b0332907edda690725036e8",
+    "search_tags": "tien vira",
+    "source"     : "https://www.newgrounds.com/art/view/majinsfw/hypno-cruise-ship",
+    "uploader"   : "Deskjet23",
+},
+
+{
     "#url"     : "https://rule34.paheal.net/post/view/481609",
     "#category": ("shimmie2", "paheal", "post"),
     "#class"   : paheal.PahealPostExtractor,
-    "#urls"        : "https://r34i.paheal-cdn.net/bb/dc/bbdc1c33410c2cdce7556c7990be26b7",
+    "#results"     : "https://r34i.paheal-cdn.net/bb/dc/bbdc1c33410c2cdce7556c7990be26b7",
     "#sha1_content": "7b924bcf150b352ac75c9d281d061e174c851a11",
 
     "date"     : "dt:2010-06-17 15:40:23",
@@ -92,7 +126,7 @@ __tests__ = (
     "#comment" : "video",
     "#category": ("shimmie2", "paheal", "post"),
     "#class"   : paheal.PahealPostExtractor,
-    "#urls"    : "https://r34i.paheal-cdn.net/76/29/7629fc0ff77e32637dde5bf4f992b2cb",
+    "#results" : "https://r34i.paheal-cdn.net/76/29/7629fc0ff77e32637dde5bf4f992b2cb",
 
     "date"     : "dt:2020-09-06 01:59:03",
     "duration" : 30.0,
@@ -105,6 +139,13 @@ __tests__ = (
     "tags"     : "animated Metal_Gear Metal_Gear_Solid_V Quiet Vg_erotica webm",
     "uploader" : "justausername",
     "width"    : 1768,
+},
+
+{
+    "#url"     : "https://rule34.paheal.net/post/view/7",
+    "#category": ("shimmie2", "paheal", "post"),
+    "#class"   : paheal.PahealPostExtractor,
+    "#count"   : 0,
 },
 
 )

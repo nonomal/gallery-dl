@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2023 Mike Fährmann
+# Copyright 2015-2025 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
 import sys
-import re
+from ..text import re_compile
 
 modules = [
     "2ch",
@@ -22,46 +22,75 @@ modules = [
     "8chan",
     "8muses",
     "adultempire",
+    "agnph",
+    "ahottie",
+    "allporncomic",
+    "ao3",
+    "arcalive",
     "architizer",
+    "arena",
     "artstation",
     "aryion",
-    "batoto",
+    "audiochan",
     "bbc",
     "behance",
+    "bellazon",
+    "bilibili",
     "blogger",
     "bluesky",
+    "boosty",
+    "booth",
     "bunkr",
     "catbox",
+    "cfake",
     "chevereto",
+    "cien",
+    "civitai",
+    "comedywildlifephoto",
+    "comick",
     "comicvine",
     "cyberdrop",
+    "cyberfile",
     "danbooru",
+    "dandadan",
+    "dankefuerslesen",
     "desktopography",
     "deviantart",
+    "discord",
     "dynastyscans",
     "e621",
+    "eporner",
     "erome",
+    "everia",
     "exhentai",
-    "fallenangels",
+    "facebook",
     "fanbox",
-    "fanleaks",
+    "fansly",
     "fantia",
     "fapello",
     "fapachi",
+    "fikfap",
+    "filester",
+    "fitnakedgirls",
     "flickr",
+    "foriio",
     "furaffinity",
+    "furry34",
     "fuskator",
     "gelbooru",
     "gelbooru_v01",
     "gelbooru_v02",
+    "girlsreleased",
+    "girlswithmuscle",
     "gofile",
     "hatenablog",
+    "hdoujin",
     "hentai2read",
     "hentaicosplays",
     "hentaifoundry",
-    "hentaifox",
     "hentaihand",
     "hentaihere",
+    "hentainexus",
     "hiperdex",
     "hitomi",
     "hotleak",
@@ -69,53 +98,77 @@ modules = [
     "imagebam",
     "imagechest",
     "imagefap",
+    "imagepond",
+    "imageshack",
     "imgbb",
     "imgbox",
+    "imgpile",
     "imgth",
     "imgur",
+    "imhentai",
     "inkbunny",
     "instagram",
     "issuu",
     "itaku",
     "itchio",
+    "iwara",
+    "joyreactor",
     "jschan",
     "kabeuchi",
+    "kaliscan",
     "keenspot",
-    "kemonoparty",
+    "kemono",
     "khinsider",
     "komikcast",
+    "koofr",
+    "leakgallery",
     "lensdump",
     "lexica",
     "lightroom",
+    "listal",
     "livedoor",
+    "lofter",
     "luscious",
     "lynxchan",
+    "madokami",
     "mangadex",
+    "mangafire",
     "mangafox",
+    "mangafreak",
     "mangahere",
-    "mangakakalot",
     "manganelo",
     "mangapark",
     "mangaread",
-    "mangasee",
+    "mangareader",
+    "mangataro",
+    "mangatown",
     "mangoxo",
     "misskey",
+    "mixdrop",
+    "motherless",
     "myhentaigallery",
     "myportfolio",
-    "naver",
+    "naverblog",
+    "naverchzzk",
     "naverwebtoon",
+    "nekohouse",
     "newgrounds",
     "nhentai",
     "nijie",
     "nitter",
     "nozomi",
     "nsfwalbum",
+    "nudostar",
+    "okporn",
     "paheal",
     "patreon",
+    "pexels",
     "philomena",
-    "photobucket",
+    "pholder",
     "photovogue",
     "picarto",
+    "picazor",
+    "pictoa",
     "piczel",
     "pillowfort",
     "pinterest",
@@ -127,20 +180,29 @@ modules = [
     "poringa",
     "pornhub",
     "pornpics",
+    "pornstarstube",
     "postmill",
-    "pururin",
+    "rawkuma",
     "reactor",
     "readcomiconline",
+    "realbooru",
     "reddit",
     "redgifs",
     "rule34us",
+    "rule34vault",
+    "rule34xyz",
+    "s3ndpics",
     "sankaku",
     "sankakucomplex",
+    "scatbooru",
+    "schalenetwork",
+    "scrolller",
     "seiga",
     "senmanga",
     "sexcom",
     "shimmie2",
     "simplyhentai",
+    "sizebooru",
     "skeb",
     "slickpic",
     "slideshare",
@@ -149,15 +211,21 @@ modules = [
     "speakerdeck",
     "steamgriddb",
     "subscribestar",
+    "sxypix",
     "szurubooru",
     "tapas",
     "tcbscans",
     "telegraph",
+    "tenor",
+    "thefap",
+    "thehentaiworld",
+    "tiktok",
     "tmohentai",
     "toyhouse",
-    "tsumino",
     "tumblr",
     "tumblrgallery",
+    "tungsten",
+    "turbo",
     "twibooru",
     "twitter",
     "urlgalleries",
@@ -175,14 +243,21 @@ modules = [
     "weasyl",
     "webmshare",
     "webtoons",
+    "weebcentral",
+    "weebdex",
     "weibo",
+    "whyp",
     "wikiart",
     "wikifeet",
     "wikimedia",
+    "xasiat",
+    "xenforo",
+    "xfolio",
     "xhamster",
     "xvideos",
+    "yiffverse",
+    "yourlesbians",
     "zerochan",
-    "zzup",
     "booru",
     "moebooru",
     "foolfuuka",
@@ -194,6 +269,7 @@ modules = [
     "directlink",
     "recursive",
     "oauth",
+    "noop",
     "ytdl",
     "generic",
 ]
@@ -202,25 +278,26 @@ modules = [
 def find(url):
     """Find a suitable extractor for the given URL"""
     for cls in _list_classes():
-        match = cls.pattern.match(url)
-        if match:
+        if match := cls.pattern.match(url):
             return cls(match)
     return None
 
 
 def add(cls):
     """Add 'cls' to the list of available extractors"""
-    cls.pattern = re.compile(cls.pattern)
+    if isinstance(cls.pattern, str):
+        cls.pattern = re_compile(cls.pattern)
     _cache.append(cls)
     return cls
 
 
 def add_module(module):
     """Add all extractors in 'module' to the list of available extractors"""
-    classes = _get_classes(module)
-    for cls in classes:
-        cls.pattern = re.compile(cls.pattern)
-    _cache.extend(classes)
+    if classes := _get_classes(module):
+        if isinstance(classes[0].pattern, str):
+            for cls in classes:
+                cls.pattern = re_compile(cls.pattern)
+        _cache.extend(classes)
     return classes
 
 
@@ -249,7 +326,7 @@ def _list_classes():
 def _modules_internal():
     globals_ = globals()
     for module_name in modules:
-        yield __import__(module_name, globals_, None, (), 1)
+        yield __import__(module_name, globals_, None, None, 1)
 
 
 def _modules_path(path, files):

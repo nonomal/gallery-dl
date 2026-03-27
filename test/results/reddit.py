@@ -41,6 +41,32 @@ __tests__ = (
 },
 
 {
+    "#url"     : "https://www.reddit.com/r/IdiotsInCars/search/?q=flair%3AOC",
+    "#comment" : "(#7025)",
+    "#category": ("", "reddit", "subreddit-search"),
+    "#class"   : reddit.RedditSubredditExtractor,
+    "#range"   : "1-25",
+
+    "subreddit"      : "IdiotsInCars",
+    "link_flair_text": "OC",
+},
+
+{
+    "#url"     : "https://www.old.reddit.com/r/lavaporn/",
+    "#class"   : reddit.RedditSubredditExtractor,
+},
+
+{
+    "#url"     : "https://www.np.reddit.com/r/lavaporn/",
+    "#class"   : reddit.RedditSubredditExtractor,
+},
+
+{
+    "#url"     : "https://www.m.reddit.com/r/lavaporn/",
+    "#class"   : reddit.RedditSubredditExtractor,
+},
+
+{
     "#url"     : "https://www.reddit.com/",
     "#category": ("", "reddit", "home"),
     "#class"   : reddit.RedditHomeExtractor,
@@ -78,6 +104,38 @@ __tests__ = (
     "#url"     : "https://www.reddit.com/u/username/",
     "#category": ("", "reddit", "user"),
     "#class"   : reddit.RedditUserExtractor,
+},
+
+{
+    "#url"     : "https://www.reddit.com/user/SeichiScout/submitted/?sort=hot",
+    "#category": ("", "reddit", "user-submitted"),
+    "#class"   : reddit.RedditUserExtractor,
+    "#pattern" : r"https://i\.redd\.it/\w+\.jpg",
+    "#range"   : "1-25",
+    "#count"   : 25,
+    "#archive" : False,
+
+    "author"          : "SeichiScout",
+    "author_fullname" : "t2_l8qpy6td6",
+    "user"            : {
+        "created_utc" : 1724480738.0,
+        "id"          : "l8qpy6td6",
+        "name"        : "SeichiScout",
+        "verified"    : True,
+    },
+},
+
+{
+    "#url"     : "https://www.old.reddit.com/user/username/",
+    "#class"   : reddit.RedditUserExtractor,
+},
+
+{
+    "#url"     : "https://www.reddit.com/user/Leac-/submitted/?sort=new",
+    "#comment" : "suspended user (#9177)",
+    "#category": ("", "reddit", "user-submitted"),
+    "#class"   : reddit.RedditUserExtractor,
+    "#exception": "NotFoundError:Suspended User",
 },
 
 {
@@ -169,15 +227,31 @@ __tests__ = (
 },
 
 {
-    "#url"     : "https://www.reddit.com/r/RobloxArt/comments/15ko0qu/",
-    "#comment" : "comment embeds (#5366)",
+    "#url"     : "https://www.reddit.com/comments/1nz2ic5",
+    "#comment" : "comment share URL",
     "#category": ("", "reddit", "submission"),
     "#class"   : reddit.RedditSubmissionExtractor,
+    "#pattern" : r"https://i\.redd\.it/\w+\.png",
+    "#count"   : 2,
+},
+
+{
+    "#url"     : "https://www.reddit.com/r/RobloxArt/comments/15ko0qu/",
+    "#comment" : "comment embeds (#5366)",
+    "#class"   : reddit.RedditSubmissionExtractor,
     "#options" : {"comments": 10},
-    "#urls"    : (
+    "#results" : (
         "https://i.redd.it/ppt5yciyipgb1.jpg",
         "https://i.redd.it/u0ojzd69kpgb1.png",
     ),
+},
+
+{
+    "#url"     : "https://www.reddit.com/r/RobloxArt/comments/15ko0qu/",
+    "#comment" : "disabled comment embeds (#6357)",
+    "#class"   : reddit.RedditSubmissionExtractor,
+    "#options" : {"comments": 10, "embeds": False},
+    "#results" : "https://i.redd.it/ppt5yciyipgb1.jpg",
 },
 
 {
@@ -202,7 +276,27 @@ __tests__ = (
     "#comment" : "preview.redd.it (#4470)",
     "#category": ("", "reddit", "submission"),
     "#class"   : reddit.RedditSubmissionExtractor,
-    "#urls"    : "https://preview.redd.it/u9ud4k6xaf271.jpg?auto=webp&s=19b1334cb4409111cda136c01f7b44c2c42bf9fb",
+    "#results" : "https://preview.redd.it/u9ud4k6xaf271.jpg?auto=webp&s=19b1334cb4409111cda136c01f7b44c2c42bf9fb",
+},
+
+{
+    "#url"     : "https://www.reddit.com/r/gonewildaudio/comments/1j2pxfn/",
+    "#comment" : "'selftext' option (#7111)",
+    "#category": ("", "reddit", "submission"),
+    "#class"   : reddit.RedditSubmissionExtractor,
+    "#options" : {"selftext": True, "comments": 0},
+    "#results" : (
+        "https://www.reddit.com/r/gonewildaudio/s/22pP7vizkx",
+        "https://soundgasm.net/u/chuwa/Your-Timid-Neighbor-Asks-You-To-Turn-Your-Music-Down-So-You-Fuck-Her-Stupid",
+    ),
+},
+
+{
+    "#url"     : "https://old.reddit.com/r/redgifs/comments/gfvw9v/redgifs_links_on_reddit_see_comment/",
+    "#comment" : "redgifs embed",
+    "#category": ("", "reddit", "submission"),
+    "#class"   : reddit.RedditSubmissionExtractor,
+    "#results" : "https://redgifs.com/watch/foolishforkedabyssiniancat",
 },
 
 {
@@ -226,6 +320,29 @@ __tests__ = (
 {
     "#url"     : "https://redd.it/2a00np/",
     "#category": ("", "reddit", "submission"),
+    "#class"   : reddit.RedditSubmissionExtractor,
+},
+
+{
+    "#url"     : "https://www.reddit.com/user/-frogchamp-/comments/1n260wh/osc_art_request_timelapsespeed_draw_so_far_flash/",
+    "#comment" : "video embed (#8139)",
+    "#class"   : reddit.RedditSubmissionExtractor,
+    "#options" : {"api": "rest"},
+    "#results" : "ytdl:https://v.redd.it/link/1n260wh/asset/8q50b220tplf1/DASHPlaylist.mpd?a=1759085227%2CYTU2NGJjNTlmNjBlOGE2NWUwYWI0MjRjZDYzZjllZjk4Nzc3Y2Y4Nzc1NDMzOTBkYTNkOWFjOGMzZjUzZDAzMQ%3D%3D&v=1&f=sd",
+},
+
+{
+    "#url"     : "https://www.reddit.com/r/vi/comments/1qi6tev/comment/o0v9zh8/",
+    "#comment" : "'external-preview' embed",
+    "#class"   : reddit.RedditSubmissionExtractor,
+    "#options" : {"comments": 100},
+    "#range"   : "2",
+    "#pattern" : r"https://external-preview.redd.it/0DT-wjorv2NNSSoTW-62QG4xs7ZqGE2jcn2OEa2Xnks\.gif\?width=200&height=200&s=\w+",
+    "#sha1_content": "5014a016d7d5fb2c9fdaa01f0b43afeff158cd9b",
+},
+
+{
+    "#url"     : "https://www.old.reddit.com/r/lavaporn/comments/2a00np/",
     "#class"   : reddit.RedditSubmissionExtractor,
 },
 
@@ -259,6 +376,27 @@ __tests__ = (
     "#category": ("", "reddit", "redirect"),
     "#class"   : reddit.RedditRedirectExtractor,
     "#pattern" : r"^https://www\.reddit\.com/r/analog/comments/179exao/photographing_the_recent_annular_eclipse_with_a",
+},
+
+{
+    "#url"     : "https://www.reddit.com/u/Tailhook91/s/w4yAMbtOYm",
+    "#comment" : "Mobile share URL, user submission",
+    "#category": ("", "reddit", "redirect"),
+    "#class"   : reddit.RedditRedirectExtractor,
+    "#pattern" : r"^https://www.reddit.com/user/Tailhook91/comments/znfxbr/prove_it/",
+},
+
+{
+    "#url"     : "https://www.reddit.com/user/Tailhook91/s/w4yAMbtOYm",
+    "#comment" : "Mobile share URL, user submission",
+    "#category": ("", "reddit", "redirect"),
+    "#class"   : reddit.RedditRedirectExtractor,
+    "#pattern" : r"^https://www.reddit.com/user/Tailhook91/comments/znfxbr/prove_it/",
+},
+
+{
+    "#url"     : "https://www.old.reddit.com/user/Tailhook91/s/w4yAMbtOYm",
+    "#class"   : reddit.RedditRedirectExtractor,
 },
 
 )

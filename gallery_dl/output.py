@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2023 Mike Fährmann
+# Copyright 2015-2025 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -10,7 +10,6 @@ import os
 import sys
 import shutil
 import logging
-import functools
 import unicodedata
 from . import config, util, formatter
 
@@ -18,15 +17,34 @@ from . import config, util, formatter
 # --------------------------------------------------------------------
 # Globals
 
+try:
+    TTY_STDOUT = sys.stdout.isatty()
+except Exception:
+    TTY_STDOUT = False
+
+try:
+    TTY_STDERR = sys.stderr.isatty()
+except Exception:
+    TTY_STDERR = False
+
+try:
+    TTY_STDIN = sys.stdin.isatty()
+except Exception:
+    TTY_STDIN = False
+
+
+COLORS_DEFAULT = {}
 COLORS = not os.environ.get("NO_COLOR")
-COLORS_DEFAULT = {
-    "success": "1;32",
-    "skip"   : "2",
-    "debug"  : "0;37",
-    "info"   : "1;37",
-    "warning": "1;33",
-    "error"  : "1;31",
-} if COLORS else {}
+if COLORS:
+    if TTY_STDOUT:
+        COLORS_DEFAULT["success"] = "1;32"
+        COLORS_DEFAULT["skip"] = "2"
+    if TTY_STDERR:
+        COLORS_DEFAULT["debug"] = "0;37"
+        COLORS_DEFAULT["info"] = "1;37"
+        COLORS_DEFAULT["warning"] = "1;33"
+        COLORS_DEFAULT["error"] = "1;31"
+
 
 if util.WINDOWS:
     ANSI = COLORS and os.environ.get("TERM") == "ANSI"
@@ -71,6 +89,11 @@ class LoggerAdapter():
         self.logger = logger
         self.extra = job._logger_extra
 
+    def traceback(self, exc):
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger._log(
+                logging.DEBUG, "", None, exc_info=exc, extra=self.extra)
+
     def debug(self, msg, *args, **kwargs):
         if self.logger.isEnabledFor(logging.DEBUG):
             kwargs["extra"] = self.extra
@@ -92,38 +115,6 @@ class LoggerAdapter():
             self.logger._log(logging.ERROR, msg, args, **kwargs)
 
 
-class LoggerAdapterActions():
-
-    def __init__(self, logger, job):
-        self.logger = logger
-        self.extra = job._logger_extra
-        self.actions = job._logger_actions
-
-        self.debug = functools.partial(self.log, logging.DEBUG)
-        self.info = functools.partial(self.log, logging.INFO)
-        self.warning = functools.partial(self.log, logging.WARNING)
-        self.error = functools.partial(self.log, logging.ERROR)
-
-    def log(self, level, msg, *args, **kwargs):
-        if args:
-            msg = msg % args
-
-        actions = self.actions[level]
-        if actions:
-            args = self.extra.copy()
-            args["level"] = level
-
-            for cond, action in actions:
-                if cond(msg):
-                    action(args)
-
-            level = args["level"]
-
-        if self.logger.isEnabledFor(level):
-            kwargs["extra"] = self.extra
-            self.logger._log(level, msg, (), **kwargs)
-
-
 class PathfmtProxy():
     __slots__ = ("job",)
 
@@ -132,11 +123,10 @@ class PathfmtProxy():
 
     def __getattribute__(self, name):
         pathfmt = object.__getattribute__(self, "job").pathfmt
-        return pathfmt.__dict__.get(name) if pathfmt else None
+        return getattr(pathfmt, name, None) if pathfmt else None
 
     def __str__(self):
-        pathfmt = object.__getattribute__(self, "job").pathfmt
-        if pathfmt:
+        if pathfmt := object.__getattribute__(self, "job").pathfmt:
             return pathfmt.path or pathfmt.directory
         return ""
 
@@ -180,10 +170,52 @@ class Formatter(logging.Formatter):
         if record.exc_info and not record.exc_text:
             record.exc_text = self.formatException(record.exc_info)
         if record.exc_text:
-            msg = msg + "\n" + record.exc_text
+            msg = f"{msg}\n{record.exc_text}"
         if record.stack_info:
-            msg = msg + "\n" + record.stack_info
+            msg = f"{msg}\n{record.stack_info}"
         return msg
+
+
+class FileHandler(logging.StreamHandler):
+    def __init__(self, path, mode, encoding, delay=True):
+        self.path = path
+        self.mode = mode
+        self.errors = None
+        self.encoding = encoding
+
+        if delay:
+            logging.Handler.__init__(self)
+            self.stream = None
+            self.emit = self.emit_delayed
+        else:
+            logging.StreamHandler.__init__(self, self._open())
+
+    def close(self):
+        with self.lock:
+            try:
+                if self.stream:
+                    try:
+                        self.flush()
+                        self.stream.close()
+                    finally:
+                        self.stream = None
+            finally:
+                logging.StreamHandler.close(self)
+
+    def _open(self):
+        try:
+            return open(self.path, self.mode,
+                        encoding=self.encoding, errors=self.errors)
+        except FileNotFoundError:
+            os.makedirs(os.path.dirname(self.path))
+            return open(self.path, self.mode,
+                        encoding=self.encoding, errors=self.errors)
+
+    def emit_delayed(self, record):
+        if self.mode != "w" or not self._closed:
+            self.stream = self._open()
+        self.emit = logging.StreamHandler.emit.__get__(self)
+        self.emit(record)
 
 
 def initialize_logging(loglevel):
@@ -249,8 +281,7 @@ def configure_logging(loglevel):
             minlevel = handler.level
 
     # file logging handler
-    handler = setup_logging_handler("logfile", lvl=loglevel)
-    if handler:
+    if handler := setup_logging_handler("logfile", lvl=loglevel):
         root.addHandler(handler)
         if minlevel > handler.level:
             minlevel = handler.level
@@ -258,7 +289,8 @@ def configure_logging(loglevel):
     root.setLevel(minlevel)
 
 
-def setup_logging_handler(key, fmt=LOG_FORMAT, lvl=LOG_LEVEL, mode="w"):
+def setup_logging_handler(key, fmt=LOG_FORMAT, lvl=LOG_LEVEL, mode="w",
+                          defer=False):
     """Setup a new logging handler"""
     opts = config.interpolate(("output",), key)
     if not opts:
@@ -269,12 +301,10 @@ def setup_logging_handler(key, fmt=LOG_FORMAT, lvl=LOG_LEVEL, mode="w"):
     path = opts.get("path")
     mode = opts.get("mode", mode)
     encoding = opts.get("encoding", "utf-8")
+    delay = opts.get("defer", defer)
     try:
         path = util.expand_path(path)
-        handler = logging.FileHandler(path, mode, encoding)
-    except FileNotFoundError:
-        os.makedirs(os.path.dirname(path))
-        handler = logging.FileHandler(path, mode, encoding)
+        handler = FileHandler(path, mode, encoding, delay)
     except (OSError, ValueError) as exc:
         logging.getLogger("gallery-dl").warning(
             "%s: %s", key, exc)
@@ -333,18 +363,7 @@ def configure_standard_streams():
         elif not options.get("errors"):
             options["errors"] = "replace"
 
-        try:
-            stream.reconfigure(**options)
-        except AttributeError:
-            # no 'reconfigure' support
-            oget = options.get
-            setattr(sys, name, stream.__class__(
-                stream.buffer,
-                encoding=oget("encoding", stream.encoding),
-                errors=oget("errors", "replace"),
-                newline=oget("newline", stream.newlines),
-                line_buffering=oget("line_buffering", stream.line_buffering),
-            ))
+        stream.reconfigure(**options)
 
 
 # --------------------------------------------------------------------
@@ -356,7 +375,7 @@ def select():
 
     if mode is None or mode == "auto":
         try:
-            if sys.stdout.isatty():
+            if TTY_STDOUT:
                 output = ColorOutput() if ANSI else TerminalOutput()
             else:
                 output = PipeOutput()
@@ -364,6 +383,8 @@ def select():
             output = PipeOutput()
     elif isinstance(mode, dict):
         output = CustomOutput(mode)
+    elif not mode:
+        output = NullOutput()
     else:
         output = {
             "default" : PipeOutput,
@@ -397,17 +418,16 @@ class NullOutput():
 class PipeOutput(NullOutput):
 
     def skip(self, path):
-        stdout_write(CHAR_SKIP + path + "\n")
+        stdout_write(f"{CHAR_SKIP}{path}\n")
 
     def success(self, path):
-        stdout_write(path + "\n")
+        stdout_write(f"{path}\n")
 
 
 class TerminalOutput():
 
     def __init__(self):
-        shorten = config.get(("output",), "shorten", True)
-        if shorten:
+        if shorten := config.get(("output",), "shorten", True):
             func = shorten_string_eaw if shorten == "eaw" else shorten_string
             limit = shutil.get_terminal_size().columns - OFFSET
             sep = CHAR_ELLIPSIES
@@ -416,22 +436,22 @@ class TerminalOutput():
             self.shorten = util.identity
 
     def start(self, path):
-        stdout_write_flush(self.shorten("  " + path))
+        stdout_write_flush(self.shorten(f"  {path}"))
 
     def skip(self, path):
-        stdout_write(self.shorten(CHAR_SKIP + path) + "\n")
+        stdout_write(f"{self.shorten(CHAR_SKIP + path)}\n")
 
     def success(self, path):
-        stdout_write("\r" + self.shorten(CHAR_SUCCESS + path) + "\n")
+        stdout_write(f"\r{self.shorten(CHAR_SUCCESS + path)}\n")
 
     def progress(self, bytes_total, bytes_downloaded, bytes_per_second):
         bdl = util.format_value(bytes_downloaded)
         bps = util.format_value(bytes_per_second)
         if bytes_total is None:
-            stderr_write("\r{:>7}B {:>7}B/s ".format(bdl, bps))
+            stderr_write(f"\r{bdl:>7}B {bps:>7}B/s ")
         else:
-            stderr_write("\r{:>3}% {:>7}B {:>7}B/s ".format(
-                bytes_downloaded * 100 // bytes_total, bdl, bps))
+            stderr_write(f"\r{bytes_downloaded * 100 // bytes_total:>3}% "
+                         f"{bdl:>7}B {bps:>7}B/s ")
 
 
 class ColorOutput(TerminalOutput):
@@ -443,19 +463,17 @@ class ColorOutput(TerminalOutput):
         if colors is None:
             colors = COLORS_DEFAULT
 
-        self.color_skip = "\033[{}m".format(
-            colors.get("skip", "2"))
-        self.color_success = "\r\033[{}m".format(
-            colors.get("success", "1;32"))
+        self.color_skip = f"\x1b[{colors.get('skip', '2')}m"
+        self.color_success = f"\r\x1b[{colors.get('success', '1;32')}m"
 
     def start(self, path):
         stdout_write_flush(self.shorten(path))
 
     def skip(self, path):
-        stdout_write(self.color_skip + self.shorten(path) + "\033[0m\n")
+        stdout_write(f"{self.color_skip}{self.shorten(path)}\x1b[0m\n")
 
     def success(self, path):
-        stdout_write(self.color_success + self.shorten(path) + "\033[0m\n")
+        stdout_write(f"{self.color_success}{self.shorten(path)}\x1b[0m\n")
 
 
 class CustomOutput():
@@ -474,8 +492,7 @@ class CustomOutput():
         if isinstance(fmt_success, list):
             off_success, fmt_success = fmt_success
 
-        shorten = config.get(("output",), "shorten", True)
-        if shorten:
+        if shorten := config.get(("output",), "shorten", True):
             func = shorten_string_eaw if shorten == "eaw" else shorten_string
             width = shutil.get_terminal_size().columns
 
@@ -495,8 +512,7 @@ class CustomOutput():
         self._fmt_progress_total = (options.get("progress-total") or
                                     "\r{3:>3}% {0:>7}B {1:>7}B/s ").format
 
-    @staticmethod
-    def _make_func(shorten, format_string, limit):
+    def _make_func(self, shorten, format_string, limit):
         fmt = format_string.format
         return lambda txt: fmt(shorten(txt, limit, CHAR_ELLIPSIES))
 
@@ -533,7 +549,7 @@ def shorten_string(txt, limit, sep="…"):
     if len(txt) <= limit:
         return txt
     limit -= len(sep)
-    return txt[:limit // 2] + sep + txt[-((limit+1) // 2):]
+    return f"{txt[:limit // 2]}{sep}{txt[-((limit+1) // 2):]}"
 
 
 def shorten_string_eaw(txt, limit, sep="…", cache=EAWCache()):
@@ -548,7 +564,7 @@ def shorten_string_eaw(txt, limit, sep="…", cache=EAWCache()):
     limit -= len(sep)
     if text_width == len(txt):
         # all characters have a width of 1
-        return txt[:limit // 2] + sep + txt[-((limit+1) // 2):]
+        return f"{txt[:limit // 2]}{sep}{txt[-((limit+1) // 2):]}"
 
     # wide characters
     left = 0
@@ -567,4 +583,4 @@ def shorten_string_eaw(txt, limit, sep="…", cache=EAWCache()):
             break
         right -= 1
 
-    return txt[:left] + sep + txt[right+1:]
+    return f"{txt[:left]}{sep}{txt[right+1:]}"

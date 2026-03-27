@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018-2023 Mike Fährmann
+# Copyright 2018-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,7 +9,7 @@
 """Extractors for https://www.smugmug.com/"""
 
 from .common import Extractor, Message
-from .. import text, oauth, exception
+from .. import text, oauth
 
 BASE_PATTERN = (
     r"(?:smugmug:(?!album:)(?:https?://)?([^/]+)|"
@@ -21,7 +21,6 @@ class SmugmugExtractor(Extractor):
     category = "smugmug"
     filename_fmt = ("{category}_{User[NickName]:?/_/}"
                     "{Image[UploadKey]}_{Image[ImageKey]}.{extension}")
-    cookies_domain = None
     empty_user = {
         "Uri": "",
         "ResponseLevel": "Public",
@@ -72,7 +71,7 @@ class SmugmugAlbumExtractor(SmugmugExtractor):
 
     def __init__(self, match):
         SmugmugExtractor.__init__(self, match)
-        self.album_id = match.group(1)
+        self.album_id = match[1]
 
     def items(self):
         album = self.api.album(self.album_id, "User")
@@ -82,7 +81,7 @@ class SmugmugAlbumExtractor(SmugmugExtractor):
         del album["Uris"]
         data = {"Album": album, "User": user}
 
-        yield Message.Directory, data
+        yield Message.Directory, "", data
 
         for image in self.api.album_images(self.album_id, "ImageSizeDetails"):
             url = self._select_format(image)
@@ -99,7 +98,7 @@ class SmugmugImageExtractor(SmugmugExtractor):
 
     def __init__(self, match):
         SmugmugExtractor.__init__(self, match)
-        self.image_id = match.group(3)
+        self.image_id = match[3]
 
     def items(self):
         image = self.api.image(self.image_id, "ImageSizeDetails")
@@ -108,7 +107,7 @@ class SmugmugImageExtractor(SmugmugExtractor):
         data = {"Image": image}
         text.nameext_from_url(url, data)
 
-        yield Message.Directory, data
+        yield Message.Directory, "", data
         yield Message.Url, url, data
 
 
@@ -198,29 +197,32 @@ class SmugmugAPI(oauth.OAuth1API):
         return self._expansion(endpoint, "Node", params)
 
     def _call(self, endpoint, params=None, domain=API_DOMAIN):
-        url = "https://{}/api/v2/{}".format(domain, endpoint)
+        url = f"https://{domain}/api/v2/{endpoint}"
         params = params or {}
         if self.api_key:
             params["APIKey"] = self.api_key
         params["_verbosity"] = "1"
 
         response = self.request(url, params=params, headers=self.HEADERS)
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            raise self.exc.NotFoundError(self.extractor.__class__.subcategory)
 
         if 200 <= data["Code"] < 400:
             return data
         if data["Code"] == 404:
-            raise exception.NotFoundError()
+            raise self.exc.NotFoundError(self.extractor.__class__.subcategory)
         if data["Code"] == 429:
-            raise exception.StopExtraction("Rate limit reached")
+            raise self.exc.AbortExtraction("Rate limit reached")
         self.log.debug(data)
-        raise exception.StopExtraction("API request failed")
+        raise self.exc.AbortExtraction("API request failed")
 
     def _expansion(self, endpoint, expands, params=None):
         endpoint = self._extend(endpoint, expands)
         result = self._apply_expansions(self._call(endpoint, params), expands)
         if not result:
-            raise exception.NotFoundError()
+            raise self.exc.NotFoundError()
         return result[0]
 
     def _pagination(self, endpoint, expands=None):
@@ -235,14 +237,12 @@ class SmugmugAPI(oauth.OAuth1API):
                 return
             params["start"] += params["count"]
 
-    @staticmethod
-    def _extend(endpoint, expands):
+    def _extend(self, endpoint, expands):
         if expands:
             endpoint += "?_expand=" + expands
         return endpoint
 
-    @staticmethod
-    def _apply_expansions(data, expands):
+    def _apply_expansions(self, data, expands):
 
         def unwrap(response):
             locator = response["Locator"]

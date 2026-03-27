@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2022-2023 Mike Fährmann
+# Copyright 2022-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,8 +9,8 @@
 """Extractors for https://www.zerochan.net/"""
 
 from .booru import BooruExtractor
-from ..cache import cache
-from .. import text, util, exception
+from .. import text, util
+import collections
 
 BASE_PATTERN = r"(?:https?://)?(?:www\.)?zerochan\.net"
 
@@ -22,9 +22,10 @@ class ZerochanExtractor(BooruExtractor):
     filename_fmt = "{id}.{extension}"
     archive_fmt = "{id}"
     page_start = 1
-    per_page = 250
+    per_page = 200
     cookies_domain = ".zerochan.net"
     cookies_names = ("z_id", "z_hash")
+    useragent = util.USERAGENT_GALLERYDL
     request_interval = (0.5, 1.5)
 
     def login(self):
@@ -34,11 +35,12 @@ class ZerochanExtractor(BooruExtractor):
 
         username, password = self._get_auth_info()
         if username:
-            return self.cookies_update(self._login_impl(username, password))
+            return self.cookies_update(self.cache(
+                self._login_impl, username, password,
+                _exp=90*86400, _mem=False))
 
         self._logged_in = False
 
-    @cache(maxage=90*86400, keyarg=1)
     def _login_impl(self, username, password):
         self.log.info("Logging in as %s", username)
 
@@ -54,44 +56,60 @@ class ZerochanExtractor(BooruExtractor):
             "login"   : "Login",
         }
 
-        response = self.request(url, method="POST", headers=headers, data=data)
+        response = self.request(
+            url, method="POST", headers=headers, data=data, expected=(500,))
         if not response.history:
-            raise exception.AuthenticationError()
+            raise self.exc.AuthenticationError()
 
         return response.cookies
 
     def _parse_entry_html(self, entry_id):
-        url = "{}/{}".format(self.root, entry_id)
-        extr = text.extract_from(self.request(url).text)
+        url = f"{self.root}/{entry_id}"
+        page = self.request(url, expected=(500,)).text
 
+        try:
+            jsonld = self._extract_jsonld(page)
+        except Exception:
+            return {"id": entry_id}
+
+        extr = text.extract_from(page)
         data = {
             "id"      : text.parse_int(entry_id),
-            "author"  : text.parse_unicode_escapes(extr('    "name": "', '"')),
-            "file_url": extr('"contentUrl": "', '"'),
-            "date"    : text.parse_datetime(extr('"datePublished": "', '"')),
-            "width"   : text.parse_int(extr('"width": "', ' ')),
-            "height"  : text.parse_int(extr('"height": "', ' ')),
-            "size"    : text.parse_bytes(extr('"contentSize": "', 'B')),
+            "file_url": jsonld["contentUrl"],
+            "date"    : self.parse_datetime_iso(jsonld["datePublished"]),
+            "width"   : text.parse_int(jsonld["width"][:-3]),
+            "height"  : text.parse_int(jsonld["height"][:-3]),
+            "size"    : text.parse_bytes(jsonld["contentSize"][:-1]),
             "path"    : text.split_html(extr(
                 'class="breadcrumbs', '</nav>'))[2:],
             "uploader": extr('href="/user/', '"'),
             "tags"    : extr('<ul id="tags"', '</ul>'),
-            "source"  : extr('<h2>Source</h2>', '</p><h2>').rpartition(
-                ">")[2] or None,
+            "source"  : text.unescape(text.remove_html(extr(
+                'id="source-url"', '</p>').rpartition("</s>")[2])),
         }
+
+        try:
+            data["author"] = jsonld["author"]["name"]
+        except Exception:
+            data["author"] = ""
 
         html = data["tags"]
         tags = data["tags"] = []
         for tag in html.split("<li class=")[1:]:
-            category = text.extr(tag, 'data-type="', '"')
-            name = text.extr(tag, 'data-tag="', '"')
-            tags.append(category.capitalize() + ":" + name)
+            category = text.extr(tag, '"', '"')
+            name = text.unescape(text.extr(tag, 'data-tag="', '"'))
+            tags.append(category.partition(" ")[0].capitalize() + ":" + name)
 
         return data
 
     def _parse_entry_api(self, entry_id):
-        url = "{}/{}?json".format(self.root, entry_id)
-        item = self.request(url).json()
+        url = f"{self.root}/{entry_id}?json"
+        txt = self.request(url).text
+        try:
+            item = util.json_loads(txt)
+        except ValueError:
+            item = self._parse_json(txt)
+            item["id"] = text.parse_int(entry_id)
 
         data = {
             "id"      : item["id"],
@@ -108,6 +126,35 @@ class ZerochanExtractor(BooruExtractor):
             data["tags"] = item["tags"]
 
         return data
+
+    def _parse_json(self, txt):
+        txt = text.re(r"[\x00-\x1f\x7f]").sub("", txt)
+        main, _, tags = txt.partition('tags": [')
+
+        item = {}
+        for line in main.split(',  "')[1:]:
+            key, _, value = line.partition('": ')
+            if value:
+                if value[0] == '"':
+                    value = value[1:-1]
+                else:
+                    value = text.parse_int(value)
+            if key:
+                item[key] = value
+
+        item["tags"] = tags = tags[5:].split('",    "')
+        if tags:
+            tags[-1] = tags[-1][:-5]
+
+        return item
+
+    def _tags(self, post, page):
+        tags = collections.defaultdict(list)
+        for tag in post["tags"]:
+            category, _, name = tag.partition(":")
+            tags[category].append(name)
+        for key, value in tags.items():
+            post["tags_" + key.lower()] = value
 
 
 class ZerochanTagExtractor(ZerochanExtractor):
@@ -126,7 +173,13 @@ class ZerochanTagExtractor(ZerochanExtractor):
             self.per_page = 24
         else:
             self.posts = self.posts_api
-            self.session.headers["User-Agent"] = util.USERAGENT
+
+        if exts := self.config("extensions"):
+            if isinstance(exts, str):
+                exts = exts.split(",")
+            self.exts = exts
+        else:
+            self.exts = ("jpg", "png", "webp", "gif")
 
     def metadata(self):
         return {"search_tags": text.unquote(
@@ -134,12 +187,19 @@ class ZerochanTagExtractor(ZerochanExtractor):
 
     def posts_html(self):
         url = self.root + "/" + self.search_tag
-        params = text.parse_query(self.query)
-        params["p"] = text.parse_int(params.get("p"), self.page_start)
         metadata = self.config("metadata")
 
+        params = text.parse_query(self.query, empty=True)
+        params["p"] = text.parse_int(params.get("p"), self.page_start)
+
         while True:
-            page = self.request(url, params=params).text
+            try:
+                page = self.request(
+                    url, params=params, expected=(500,)).text
+            except self.exc.HttpError as exc:
+                if exc.status == 404:
+                    return
+                raise
             thumbs = text.extr(page, '<ul id="thumbs', '</ul>')
             extr = text.extract_from(thumbs)
 
@@ -171,19 +231,33 @@ class ZerochanTagExtractor(ZerochanExtractor):
     def posts_api(self):
         url = self.root + "/" + self.search_tag
         metadata = self.config("metadata")
-        params = {
-            "json": "1",
-            "l"   : self.per_page,
-            "p"   : self.page_start,
-        }
 
-        static = "https://static.zerochan.net/.full."
+        params = text.parse_query(self.query, empty=True)
+        params["p"] = text.parse_int(params.get("p"), self.page_start)
+        params.setdefault("l", self.per_page)
+        params["json"] = "1"
 
         while True:
-            data = self.request(url, params=params).json()
+            try:
+                response = self.request(
+                    url, params=params, allow_redirects=False)
+            except self.exc.HttpError as exc:
+                if exc.status == 404:
+                    return
+                raise
+
+            if response.status_code >= 300:
+                url = text.urljoin(self.root, response.headers["location"])
+                self.log.warning("HTTP redirect to %s", url)
+                if self.config("redirects"):
+                    continue
+                raise self.exc.AbortExtraction()
+
+            data = response.json()
             try:
                 posts = data["items"]
-            except ValueError:
+            except Exception:
+                self.log.debug("Server response: %s", data)
                 return
 
             if metadata:
@@ -191,17 +265,22 @@ class ZerochanTagExtractor(ZerochanExtractor):
                     post_id = post["id"]
                     post.update(self._parse_entry_html(post_id))
                     post.update(self._parse_entry_api(post_id))
+                    yield post
             else:
                 for post in posts:
-                    base = static + str(post["id"])
-                    post["file_url"] = base + ".jpg"
-                    post["_fallback"] = (base + ".png",)
-
-            yield from posts
+                    urls = self._urls(post)
+                    post["file_url"] = next(urls)
+                    post["_fallback"] = urls
+                    yield post
 
             if not data.get("next"):
                 return
             params["p"] += 1
+
+    def _urls(self, post, static="https://static.zerochan.net/.full."):
+        base = static + str(post["id"]) + "."
+        for ext in self.exts:
+            yield base + ext
 
 
 class ZerochanImageExtractor(ZerochanExtractor):
@@ -209,12 +288,18 @@ class ZerochanImageExtractor(ZerochanExtractor):
     pattern = BASE_PATTERN + r"/(\d+)"
     example = "https://www.zerochan.net/12345"
 
-    def __init__(self, match):
-        ZerochanExtractor.__init__(self, match)
-        self.image_id = match.group(1)
-
     def posts(self):
-        post = self._parse_entry_html(self.image_id)
+        image_id = self.groups[0]
+
+        try:
+            post = self._parse_entry_html(image_id)
+        except self.exc.HttpError as exc:
+            if exc.status in {404, 410}:
+                if msg := text.extr(exc.response.text, "<h2>", "<"):
+                    self.log.warning(f"'{msg}'")
+                return ()
+            raise
+
         if self.config("metadata"):
-            post.update(self._parse_entry_api(self.image_id))
+            post.update(self._parse_entry_api(image_id))
         return (post,)

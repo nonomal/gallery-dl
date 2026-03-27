@@ -6,7 +6,6 @@
 
 gallery_dl = __import__("gallery_dl.extractor.4archive")
 _4archive = getattr(gallery_dl.extractor, "4archive")
-import datetime
 
 
 __tests__ = (
@@ -14,12 +13,12 @@ __tests__ = (
     "#url"     : "https://4archive.org/board/u/thread/2397221",
     "#category": ("", "4archive", "thread"),
     "#class"   : _4archive._4archiveThreadExtractor,
-    "#pattern" : r"https://i\.imgur\.com/\w{7}\.\w+$",
+    "#pattern" : r"https://(cdn\.4archive\.org/u/image/150\d/\d\d\d/\d+\.\w+|4archive\.org/image/image-404\.png)",
     "#count"   : 16,
 
     "board" : "u",
     "com"   : str,
-    "date"  : datetime.datetime,
+    "date"  : "type:datetime",
     "name"  : "Anonymous",
     "no"    : range(2397221, 2418158),
     "thread": 2397221,
@@ -35,7 +34,7 @@ __tests__ = (
     "#url"     : "https://4archive.org/board/jp/thread/17611798",
     "#category": ("", "4archive", "thread"),
     "#class"   : _4archive._4archiveThreadExtractor,
-    "#pattern" : r"https://i\.imgur\.com/\w{7}\.\w+$",
+    "#pattern" : r"https://(cdn\.4archive\.org/jp/image/\d\d\d\d/\d\d\d/\d+\.\w+|4archive\.org/image/image-404\.png)",
     "#count"   : 85,
 },
 

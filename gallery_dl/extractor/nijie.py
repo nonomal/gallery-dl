@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2023 Mike Fährmann
+# Copyright 2015-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -8,9 +8,8 @@
 
 """Extractors for nijie instances"""
 
-from .common import BaseExtractor, Message, AsynchronousMixin
-from .. import text, exception
-from ..cache import cache
+from .common import BaseExtractor, Message, Dispatch, AsynchronousMixin
+from .. import text, dt
 
 
 class NijieExtractor(AsynchronousMixin, BaseExtractor):
@@ -23,7 +22,7 @@ class NijieExtractor(AsynchronousMixin, BaseExtractor):
 
     def __init__(self, match):
         BaseExtractor.__init__(self, match)
-        self.user_id = text.parse_int(match.group(match.lastindex))
+        self.user_id = text.parse_int(self.groups[-1])
 
     def initialize(self):
         self.cookies_domain = "." + self.root.rpartition("/")[2]
@@ -40,7 +39,7 @@ class NijieExtractor(AsynchronousMixin, BaseExtractor):
 
         for image_id in self.image_ids():
 
-            url = "{}/view.php?id={}".format(self.root, image_id)
+            url = f"{self.root}/view.php?id={image_id}"
             response = self.request(url, fatal=False)
             if response.status_code >= 400:
                 continue
@@ -56,10 +55,10 @@ class NijieExtractor(AsynchronousMixin, BaseExtractor):
                 data["user_id"] = data["artist_id"]
                 data["user_name"] = data["artist_name"]
 
-            urls = list(self._extract_images(image_id, page))
+            urls = self._extract_images(image_id, page)
             data["count"] = len(urls)
 
-            yield Message.Directory, data
+            yield Message.Directory, "", data
             for num, url in enumerate(urls):
                 image = text.nameext_from_url(url, {
                     "num": num,
@@ -73,8 +72,7 @@ class NijieExtractor(AsynchronousMixin, BaseExtractor):
     def image_ids(self):
         """Collect all relevant image-ids"""
 
-    @staticmethod
-    def _extract_data(page):
+    def _extract_data(self, page):
         """Extract image metadata from 'page'"""
         extr = text.extract_from(page)
         keywords = text.unescape(extr(
@@ -83,15 +81,15 @@ class NijieExtractor(AsynchronousMixin, BaseExtractor):
             "title"      : keywords[0].strip(),
             "description": text.unescape(extr(
                 '"description": "', '"').replace("&amp;", "&")),
-            "date"       : text.parse_datetime(extr(
-                '"datePublished": "', '"'), "%a %b %d %H:%M:%S %Y", 9),
+            "date"       : dt.parse(extr(
+                '"datePublished": "', '"'), "%a %b %d %H:%M:%S %Y"
+            ) - dt.timedelta(hours=9),
             "artist_id"  : text.parse_int(extr('/members.php?id=', '"')),
             "artist_name": keywords[1],
             "tags"       : keywords[2:-1],
         }
 
-    @staticmethod
-    def _extract_data_horne(page):
+    def _extract_data_horne(self, page):
         """Extract image metadata from 'page'"""
         extr = text.extract_from(page)
         keywords = text.unescape(extr(
@@ -103,24 +101,28 @@ class NijieExtractor(AsynchronousMixin, BaseExtractor):
             "artist_id"  : text.parse_int(extr('members.php?id=', '"')),
             "artist_name": keywords[1],
             "tags"       : keywords[2:-1],
-            "date"       : text.parse_datetime(extr(
-                "itemprop='datePublished' content=", "<").rpartition(">")[2],
-                "%Y-%m-%d %H:%M:%S", 9),
+            "date"       : dt.parse_iso(extr(
+                "itemprop='datePublished' content=", "<").rpartition(">")[2]
+            ) - dt.timedelta(hours=9),
         }
 
     def _extract_images(self, image_id, page):
         if '&#diff_1" ' in page:
             # multiple images
-            url = "{}/view_popup.php?id={}".format(self.root, image_id)
+            url = f"{self.root}/view_popup.php?id={image_id}"
             page = self.request(url).text
-            yield from text.extract_iter(
-                page, 'href="javascript:void(0);"><img src="', '"')
+            return [
+                text.extr(media, ' src="', '"')
+                for media in text.extract_iter(
+                    page, 'href="javascript:void(0);"><', '>')
+                if ' src="' in media
+            ]
         else:
             pos = page.find('id="view-center"') + 1
-            yield text.extract(page, 'itemprop="image" src="', '"', pos)[0]
+            # do NOT use text.extr() here, as it doesn't support a pos argument
+            return (text.extract(page, 'itemprop="image" src="', '"', pos)[0],)
 
-    @staticmethod
-    def _extract_user_name(page):
+    def _extract_user_name(self, page):
         return text.unescape(text.extr(page, "<br />", "<"))
 
     def login(self):
@@ -129,24 +131,25 @@ class NijieExtractor(AsynchronousMixin, BaseExtractor):
 
         username, password = self._get_auth_info()
         if username:
-            return self.cookies_update(self._login_impl(username, password))
+            return self.cookies_update(self.cache(
+                self._login_impl, username, password,
+                _exp=90*86400, _mem=False))
 
-        raise exception.AuthenticationError("Username and password required")
+        raise self.exc.AuthenticationError("Username and password required")
 
-    @cache(maxage=90*86400, keyarg=1)
     def _login_impl(self, username, password):
         self.log.info("Logging in as %s", username)
 
-        url = "{}/login_int.php".format(self.root)
+        url = self.root + "/login_int.php"
         data = {"email": username, "password": password, "save": "on"}
 
         response = self.request(url, method="POST", data=data)
         if "/login.php" in response.text:
-            raise exception.AuthenticationError()
+            raise self.exc.AuthenticationError()
         return self.cookies
 
     def _pagination(self, path):
-        url = "{}/{}.php".format(self.root, path)
+        url = f"{self.root}/{path}.php"
         params = {"id": self.user_id, "p": 1}
 
         while True:
@@ -173,18 +176,13 @@ BASE_PATTERN = NijieExtractor.update({
 })
 
 
-class NijieUserExtractor(NijieExtractor):
+class NijieUserExtractor(Dispatch, NijieExtractor):
     """Extractor for nijie user profiles"""
-    subcategory = "user"
-    cookies_domain = None
     pattern = BASE_PATTERN + r"/members\.php\?id=(\d+)"
     example = "https://nijie.info/members.php?id=12345"
 
-    def initialize(self):
-        pass
-
     def items(self):
-        fmt = "{}/{{}}.php?id={}".format(self.root, self.user_id).format
+        fmt = f"{self.root}/{{}}.php?id={self.user_id}".format
         return self._dispatch_extractors((
             (NijieIllustrationExtractor, fmt("members_illust")),
             (NijieDoujinExtractor      , fmt("members_dojin")),
@@ -248,8 +246,7 @@ class NijieNuitaExtractor(NijieExtractor):
         data["user_name"] = self.user_name
         return data
 
-    @staticmethod
-    def _extract_user_name(page):
+    def _extract_user_name(self, page):
         return text.unescape(text.extr(page, "<title>", "さんの抜いた"))
 
 
@@ -262,8 +259,7 @@ class NijieFeedExtractor(NijieExtractor):
     def image_ids(self):
         return self._pagination("like_user_view")
 
-    @staticmethod
-    def _extract_user_name(page):
+    def _extract_user_name(self, page):
         return ""
 
 
@@ -285,7 +281,7 @@ class NijieFollowedExtractor(NijieExtractor):
 
             for user_id in text.extract_iter(
                     page, '"><a href="/members.php?id=', '"'):
-                user_url = "{}/members.php?id={}".format(self.root, user_id)
+                user_url = f"{self.root}/members.php?id={user_id}"
                 yield Message.Queue, user_url, data
 
             if '<a rel="next"' not in page:
@@ -299,9 +295,5 @@ class NijieImageExtractor(NijieExtractor):
     pattern = BASE_PATTERN + r"/view(?:_popup)?\.php\?id=(\d+)"
     example = "https://nijie.info/view.php?id=12345"
 
-    def __init__(self, match):
-        NijieExtractor.__init__(self, match)
-        self.image_id = match.group(match.lastindex)
-
     def image_ids(self):
-        return (self.image_id,)
+        return (self.groups[-1],)

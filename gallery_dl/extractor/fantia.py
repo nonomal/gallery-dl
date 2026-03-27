@@ -48,7 +48,7 @@ class FantiaExtractor(Extractor):
 
             for content in contents:
                 files = self._process_content(post, content)
-                yield Message.Directory, post
+                yield Message.Directory, "", post
 
                 if content["visible_status"] != "visible":
                     self.log.warning(
@@ -68,19 +68,18 @@ class FantiaExtractor(Extractor):
     def posts(self):
         """Return post IDs"""
 
-    def _pagination(self, url):
-        params = {"page": 1}
+    def _pagination(self, url, params, needle=""):
+        params["page"] = 1
 
         while True:
             page = self.request(url, params=params).text
             self._csrf_token(page)
 
-            post_id = None
-            for post_id in text.extract_iter(
-                    page, 'class="link-block" href="/posts/', '"'):
-                yield post_id
+            target_id = None
+            for target_id in text.extract_iter(page, needle, '"'):
+                yield target_id
 
-            if not post_id:
+            if not target_id:
                 return
             params["page"] += 1
 
@@ -93,7 +92,7 @@ class FantiaExtractor(Extractor):
     def _get_post_data(self, post_id):
         """Fetch and process post data"""
         url = self.root+"/api/v1/posts/"+post_id
-        resp = self.request(url, headers=self.headers).json()["post"]
+        resp = self.request_json(url, headers=self.headers)["post"]
         return {
             "post_id": resp["id"],
             "post_url": self.root + "/posts/" + str(resp["id"]),
@@ -101,7 +100,7 @@ class FantiaExtractor(Extractor):
             "comment": resp["comment"],
             "rating": resp["rating"],
             "posted_at": resp["posted_at"],
-            "date": text.parse_datetime(
+            "date": self.parse_datetime(
                 resp["posted_at"], "%a, %d %b %Y %H:%M:%S %z"),
             "fanclub_id": resp["fanclub"]["id"],
             "fanclub_user_id": resp["fanclub"]["user"]["id"],
@@ -179,13 +178,9 @@ class FantiaCreatorExtractor(FantiaExtractor):
     pattern = r"(?:https?://)?(?:www\.)?fantia\.jp/fanclubs/(\d+)"
     example = "https://fantia.jp/fanclubs/12345"
 
-    def __init__(self, match):
-        FantiaExtractor.__init__(self, match)
-        self.creator_id = match.group(1)
-
     def posts(self):
-        url = "{}/fanclubs/{}/posts".format(self.root, self.creator_id)
-        return self._pagination(url)
+        url = f"{self.root}/fanclubs/{self.groups[0]}/posts"
+        return self._pagination(url, {}, 'class="link-block" href="/posts/')
 
 
 class FantiaPostExtractor(FantiaExtractor):
@@ -194,10 +189,26 @@ class FantiaPostExtractor(FantiaExtractor):
     pattern = r"(?:https?://)?(?:www\.)?fantia\.jp/posts/(\d+)"
     example = "https://fantia.jp/posts/12345"
 
-    def __init__(self, match):
-        FantiaExtractor.__init__(self, match)
-        self.post_id = match.group(1)
-
     def posts(self):
         self._csrf_token()
-        return (self.post_id,)
+        return (self.groups[0],)
+
+
+class FantiaSupportingExtractor(FantiaExtractor):
+    """Extractor for free and paid supporting fanclubs for the current user"""
+    subcategory = "supporting"
+    pattern = (r"(?:https?://)?(?:www\.)?fantia\.jp/mypage/users/plans"
+               r"(?:\?type=((?:not_)?free))?")
+    example = "https://fantia.jp/mypage/users/plans"
+
+    def items(self):
+        url = self.root + "/mypage/users/plans"
+        base = self.root + "/fanclubs/"
+        data = {"_extractor": FantiaCreatorExtractor}
+
+        type = self.groups[0]
+        for plan_type in ("not_free", "free") if type is None else (type,):
+            params = {"type": plan_type}
+            for fanclub_id in self._pagination(
+                    url, params, 'class="user-avatar" href="/fanclubs/'):
+                yield Message.Queue, base + fanclub_id, data

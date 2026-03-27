@@ -7,8 +7,7 @@
 """Extractors for https://mangaread.org/"""
 
 from .common import ChapterExtractor, MangaExtractor
-from .. import text, exception
-import re
+from .. import text
 
 
 class MangareadBase():
@@ -16,11 +15,10 @@ class MangareadBase():
     category = "mangaread"
     root = "https://www.mangaread.org"
 
-    @staticmethod
-    def parse_chapter_string(chapter_string, data):
-        match = re.match(
-            r"(?:(.+)\s*-\s*)?[Cc]hapter\s*(\d+)(\.\d+)?(?:\s*-\s*(.+))?",
-            text.unescape(chapter_string).strip())
+    def parse_chapter_string(self, chapter_string, data):
+        match = text.re(
+            r"(?:(.+)\s*-\s*)?[Cc]hapter\s*(\d+)(\.\d+)?(?:\s*-\s*(.+))?"
+        ).match(text.unescape(chapter_string).strip())
         manga, chapter, minor, title = match.groups()
         manga = manga.strip() if manga else ""
         data["manga"] = data.pop("manga", manga)
@@ -42,7 +40,7 @@ class MangareadChapterExtractor(MangareadBase, ChapterExtractor):
         data = {"tags": list(text.split_html(tags)[::2])}
         info = text.extr(page, '<h1 id="chapter-heading">', "</h1>")
         if not info:
-            raise exception.NotFoundError("chapter")
+            raise self.exc.NotFoundError("chapter")
         self.parse_chapter_string(info, data)
         return data
 
@@ -63,16 +61,16 @@ class MangareadMangaExtractor(MangareadBase, MangaExtractor):
 
     def chapters(self, page):
         if 'class="error404' in page:
-            raise exception.NotFoundError("manga")
+            raise self.exc.NotFoundError("manga")
         data = self.metadata(page)
-        result = []
+        results = []
         for chapter in text.extract_iter(
                 page, '<li class="wp-manga-chapter', "</li>"):
             url , pos = text.extract(chapter, '<a href="', '"')
             info, _ = text.extract(chapter, ">", "</a>", pos)
             self.parse_chapter_string(info, data)
-            result.append((url, data.copy()))
-        return result
+            results.append((url, data.copy()))
+        return results
 
     def metadata(self, page):
         extr = text.extract_from(text.extr(
@@ -84,7 +82,7 @@ class MangareadMangaExtractor(MangareadBase, MangaExtractor):
             "rating"     : text.parse_float(
                 extr('total_votes">', "</span>").strip()),
             "manga_alt"  : text.remove_html(
-                extr("Alternative </h5>\n</div>", "</div>")).split("; "),
+                extr("Alternative\t\t</h5>\n\t</div>", "</div>")).split("; "),
             "author"     : list(text.extract_iter(
                 extr('class="author-content">', "</div>"), '"tag">', "</a>")),
             "artist"     : list(text.extract_iter(
@@ -92,9 +90,9 @@ class MangareadMangaExtractor(MangareadBase, MangaExtractor):
             "genres"     : list(text.extract_iter(
                 extr('class="genres-content">', "</div>"), '"tag">', "</a>")),
             "type"       : text.remove_html(
-                extr("Type </h5>\n</div>", "</div>")),
+                extr("	Type	", "\n</div>")),
             "release"    : text.parse_int(text.remove_html(
-                extr("Release </h5>\n</div>", "</div>"))),
+                extr("	Release	", "\n</div>"))),
             "status"     : text.remove_html(
-                extr("Status </h5>\n</div>", "</div>")),
+                extr("	Status	", "\n</div>")),
         }

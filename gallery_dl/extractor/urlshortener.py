@@ -7,7 +7,6 @@
 """Extractors for general-purpose URL shorteners"""
 
 from .common import BaseExtractor, Message
-from .. import exception
 
 
 class UrlshortenerExtractor(BaseExtractor):
@@ -32,21 +31,13 @@ BASE_PATTERN = UrlshortenerExtractor.update({
 class UrlshortenerLinkExtractor(UrlshortenerExtractor):
     """Extractor for general-purpose URL shorteners"""
     subcategory = "link"
-    pattern = BASE_PATTERN + r"/([^/?#]+)"
+    pattern = BASE_PATTERN + r"(/[^/?#]+)"
     example = "https://bit.ly/abcde"
 
-    def __init__(self, match):
-        UrlshortenerExtractor.__init__(self, match)
-        self.id = match.group(match.lastindex)
-
-    def _init(self):
-        self.headers = self.config_instance("headers")
-
     def items(self):
-        response = self.request(
-            "{}/{}".format(self.root, self.id), headers=self.headers,
-            method="HEAD", allow_redirects=False, notfound="URL")
-        try:
-            yield Message.Queue, response.headers["location"], {}
-        except KeyError:
-            raise exception.StopExtraction("Unable to resolve short URL")
+        url = self.root + self.groups[-1]
+        location = self.request_location(
+            url, headers=self.config_instance("headers"), notfound="URL")
+        if not location:
+            raise self.exc.AbortExtraction("Unable to resolve short URL")
+        yield Message.Queue, location, {}

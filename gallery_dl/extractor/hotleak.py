@@ -7,7 +7,7 @@
 """Extractors for https://hotleak.vip/"""
 
 from .common import Extractor, Message
-from .. import text, exception
+from .. import text
 import binascii
 
 BASE_PATTERN = r"(?:https?://)?(?:www\.)?hotleak\.vip"
@@ -23,8 +23,14 @@ class HotleakExtractor(Extractor):
 
     def items(self):
         for post in self.posts():
+            if not post["url"].startswith("ytdl:"):
+                post["url"] = (
+                    post["url"]
+                    .replace("/storage/storage/", "/storage/")
+                    .replace("_thumb.", ".")
+                )
             post["_http_expected_status"] = (404,)
-            yield Message.Directory, post
+            yield Message.Directory, "", post
             yield Message.Url, post["url"], post
 
     def posts(self):
@@ -64,8 +70,7 @@ class HotleakPostExtractor(HotleakExtractor):
         self.creator, self.type, self.id = match.groups()
 
     def posts(self):
-        url = "{}/{}/{}/{}".format(
-            self.root, self.creator, self.type, self.id)
+        url = f"{self.root}/{self.creator}/{self.type}/{self.id}"
         page = self.request(url).text
         page = text.extr(
             page, '<div class="movie-image thumb">', '</article>')
@@ -97,10 +102,10 @@ class HotleakCreatorExtractor(HotleakExtractor):
 
     def __init__(self, match):
         HotleakExtractor.__init__(self, match)
-        self.creator = match.group(1)
+        self.creator = match[1]
 
     def posts(self):
-        url = "{}/{}".format(self.root, self.creator)
+        url = f"{self.root}/{self.creator}"
         return self._pagination(url)
 
     def _pagination(self, url):
@@ -110,8 +115,8 @@ class HotleakCreatorExtractor(HotleakExtractor):
         while True:
             try:
                 response = self.request(
-                    url, headers=headers, params=params, notfound="creator")
-            except exception.HttpError as exc:
+                    url, headers=headers, params=params, notfound=True)
+            except self.exc.HttpError as exc:
                 if exc.response.status_code == 429:
                     self.wait(
                         until=exc.response.headers.get("X-RateLimit-Reset"))
@@ -153,11 +158,11 @@ class HotleakCategoryExtractor(HotleakExtractor):
         self._category, self.params = match.groups()
 
     def items(self):
-        url = "{}/{}".format(self.root, self._category)
+        url = f"{self.root}/{self._category}"
 
-        if self._category in ("hot", "creators"):
+        if self._category in {"hot", "creators"}:
             data = {"_extractor": HotleakCreatorExtractor}
-        elif self._category in ("videos", "photos"):
+        elif self._category in {"videos", "photos"}:
             data = {"_extractor": HotleakPostExtractor}
 
         for item in self._pagination(url, self.params):
@@ -172,7 +177,7 @@ class HotleakSearchExtractor(HotleakExtractor):
 
     def __init__(self, match):
         HotleakExtractor.__init__(self, match)
-        self.params = match.group(1)
+        self.params = match[1]
 
     def items(self):
         data = {"_extractor": HotleakCreatorExtractor}

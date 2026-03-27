@@ -12,6 +12,7 @@ __tests__ = (
     "#url"     : "https://xub.fanbox.cc",
     "#category": ("", "fanbox", "creator"),
     "#class"   : fanbox.FanboxCreatorExtractor,
+    "#options" : {"fee-max": 0},
     "#range"   : "1-15",
     "#count"   : ">= 15",
 
@@ -106,7 +107,7 @@ __tests__ = (
     "user": {
         "coverImageUrl"     : "https://pixiv.pximg.net/c/1620x580_90_a2_g5/fanbox/public/images/creator/74349833/cover/n9mX8q4tUXHXXj7sK1RPWyUu.jpeg",
         "creatorId"         : "official-en",
-        "description"       : "This is the official English pixivFANBOX account! \n(official Japanese account: https://official.fanbox.cc/ )\n\npixivFANBOX is a subscription service for building a reliable fan community where creators can nurture creative lifestyles together with their fans.\nFollowers can be notified of the updates from their favorite creators they are following. Supporters can enjoy closer communication with creators through exclusive content and their latest information.\n",
+        "description"       : "re:This is the official English pixivFANBOX account!.+",
         "hasAdultContent"   : False,
         "hasBoothShop"      : False,
         "iconUrl"           : "https://pixiv.pximg.net/c/160x160_90_a2_g5/fanbox/public/images/user/74349833/icon/oJH0OoGoSixLrJXlnneNvC95.jpeg",
@@ -124,11 +125,105 @@ __tests__ = (
 },
 
 {
-    "#url"     : "https://mochirong.fanbox.cc/posts/3746116",
-    "#comment" : "imageMap file order (#2718)",
+    "#url"     : "https://saki9184.fanbox.cc/posts/7754760",
+    "#comment" : "missing plan for exact 'feeRequired' value (#5759)",
     "#category": ("", "fanbox", "post"),
     "#class"   : fanbox.FanboxPostExtractor,
+    "#options" : {"metadata": "plan"},
+
+    "feeRequired": 300,
+    "plan"       : {
+        "creatorId": "saki9184",
+        "fee"      : 350,
+        "id"       : "414274",
+        "title"    : "涼宮ハルヒの同人部",
+    },
+},
+
+{
+    "#url"     : "https://mochirong.fanbox.cc/posts/3746116",
+    "#comment" : "imageMap file order (#2718); comments metadata (#6287)",
+    "#category": ("", "fanbox", "post"),
+    "#class"   : fanbox.FanboxPostExtractor,
+    "#options" : {"metadata": "comments"},
     "#sha1_url": "c92ddd06f2efc4a5fe30ec67e21544f79a5c4062",
+    "#results" : (
+        "https://pixiv.pximg.net/fanbox/public/images/post/3746116/cover/6h5w7F1MJWLeED6ODfHo6ZYQ.jpeg",
+        "https://downloads.fanbox.cc/images/post/3746116/ouTz7XZIeVD3FBOzoLhJ3ZTA.jpeg",
+        "https://downloads.fanbox.cc/images/post/3746116/hBs9bXEg6HvbqWT8QLD9g5ne.jpeg",
+        "https://downloads.fanbox.cc/images/post/3746116/C93E7db3C3sBqbDw6gQoZBMz.jpeg",
+    ),
+
+    "archives": (),
+    "comments": "len:4",
+},
+
+{
+    "#url"     : "https://mochirong.fanbox.cc/posts/9809662",
+    "#comment" : "'archives' metadata (#7454)",
+    "#class"   : fanbox.FanboxPostExtractor,
+    "#results" : (
+        "https://downloads.fanbox.cc/images/post/9809662/TUeXGybLxGVmzzrP8o3fhn27.jpeg",
+        "https://downloads.fanbox.cc/images/post/9809662/qt5fZBGxErXDAgBf2qgUZ1O8.jpeg",
+        "https://downloads.fanbox.cc/images/post/9809662/NvA7M0tIMGjA3sQxBqvdmwBm.jpeg",
+        "https://downloads.fanbox.cc/images/post/9809662/189bCj577YGtiBT7qCxVQJjK.jpeg",
+        "https://downloads.fanbox.cc/images/post/9809662/pYeCpfJYbojdj2VlyAwnh1oM.jpeg",
+        "https://downloads.fanbox.cc/files/post/9809662/8amsYwtWPtwcBVF4JnALM1ec.zip",
+        "https://downloads.fanbox.cc/files/post/9809662/6uhhqHYD4UvzVGx2I0QyLaiG.zip",
+    ),
+
+    "archives": [
+        {
+            "extension": "zip",
+            "id"       : "8amsYwtWPtwcBVF4JnALM1ec",
+            "name"     : "brushes",
+            "size"     : 1087777,
+            "url"      : "https://downloads.fanbox.cc/files/post/9809662/8amsYwtWPtwcBVF4JnALM1ec.zip",
+        },
+        {
+            "extension": "zip",
+            "id"       : "6uhhqHYD4UvzVGx2I0QyLaiG",
+            "name"     : "Manual",
+            "size"     : 3222,
+            "url"      : "https://downloads.fanbox.cc/files/post/9809662/6uhhqHYD4UvzVGx2I0QyLaiG.zip",
+        },
+    ],
+},
+
+{
+    "#url"     : "https://etlabsotwe.fanbox.cc/posts/11070192",
+    "#comment" : "(potentially?) missing 'publishedDatetime' (#8711)",
+    "#class"   : fanbox.FanboxPostExtractor,
+    "#results" : "https://pixiv.pximg.net/fanbox/public/images/post/11070192/cover/MGoWoTnJphuJSkD3owo3r7wG.jpeg",
+
+    "archives"       : (),
+    "creatorId"      : "etlabsotwe",
+    "date"           : "dt:2025-12-15 11:31:50",
+    "excerpt"        : "",
+    "extension"      : "jpeg",
+    "feeRequired"    : 200,
+    "fileUrl"        : "https://pixiv.pximg.net/fanbox/public/images/post/11070192/cover/MGoWoTnJphuJSkD3owo3r7wG.jpeg",
+    "filename"       : "MGoWoTnJphuJSkD3owo3r7wG",
+    "hasAdultContent": True,
+    "id"             : "11070192",
+    "imageForShare"  : "https://pixiv.pximg.net/c/1200x630_90_a2_g5/fanbox/public/images/post/11070192/cover/MGoWoTnJphuJSkD3owo3r7wG.jpeg",
+    "isCommentingRestricted": False,
+    "isCoverImage"   : True,
+    "isLiked"        : False,
+    "isPinned"       : False,
+    "isRestricted"   : True,
+    "likeCount"      : int,
+    "num"            : 0,
+    "publishedDatetime": "2025-12-15T20:31:50+09:00",
+    "tags"           : [],
+    "text"           : None,
+    "title"          : "Sketches 2025-12-15",
+    "type"           : "article",
+    "updatedDatetime": "iso:dt",
+    "user"           : {
+        "name"   : "ET",
+        "userId" : "74814193",
+    },
 },
 
 {
@@ -153,6 +248,37 @@ __tests__ = (
     "#category": ("", "fanbox", "redirect"),
     "#class"   : fanbox.FanboxRedirectExtractor,
     "#pattern" : fanbox.FanboxCreatorExtractor.pattern,
+},
+
+{
+    "#url"     : "https://gute-nacht-07.fanbox.cc/tags/%E3%81%BE%E3%81%A8%E3%82%81zip",
+    "#class"   : fanbox.FanboxTagExtractor,
+    "#range"   : "1-3",
+    "#results" : (
+        "https://pixiv.pximg.net/fanbox/public/images/post/6541606/cover/M7Xf4Q6ODSwVpeZH2XwWdUku.jpeg",
+        "https://pixiv.pximg.net/fanbox/public/images/post/6511517/cover/sFl5eRaGAZRXmknUH6kl59eM.jpeg",
+        "https://pixiv.pximg.net/fanbox/public/images/post/6449474/cover/3hnZUWv3aLVbPgatmJttmyPa.jpeg",
+    ),
+
+    "archives"       : (),
+    "commentCount"   : int,
+    "coverImageUrl"  : str,
+    "creatorId"      : "gute-nacht-07",
+    "date"           : "type:datetime",
+    "excerpt"        : "",
+    "extension"      : "jpeg",
+    "feeRequired"    : 500,
+    "hasAdultContent": True,
+    "isCoverImage"   : True,
+    "num"            : 0,
+    "search_tags"    : "まとめzip",
+    "tags"           : ["まとめzip"],
+    "type"           : "file",
+},
+
+{
+    "#url"     : "https://www.fanbox.cc/@ddks2923/tags/%E3%82%BD%E3%83%BC%E3%83%89%E3%82%A2%E3%83%BC%E3%83%88%E3%83%BB%E3%82%AA%E3%83%B3%E3%83%A9%E3%82%A4%E3%83%B3",
+    "#class"   : fanbox.FanboxTagExtractor,
 },
 
 )

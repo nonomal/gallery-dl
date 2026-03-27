@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright 2018-2022 Mike Fährmann
+# Copyright 2018-2025 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -19,7 +19,6 @@ import binascii
 import tempfile
 import threading
 import http.server
-
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gallery_dl import downloader, extractor, output, config, path  # noqa E402
@@ -45,11 +44,18 @@ class TestDownloaderModule(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # allow import of ytdl downloader module without youtube_dl installed
+        cls._orig_ytdl = sys.modules.get("youtube_dl")
         sys.modules["youtube_dl"] = MagicMock()
 
     @classmethod
     def tearDownClass(cls):
-        del sys.modules["youtube_dl"]
+        if cls._orig_ytdl:
+            sys.modules["youtube_dl"] = cls._orig_ytdl
+        else:
+            del sys.modules["youtube_dl"]
+
+    def setUp(self):
+        downloader._cache.clear()
 
     def tearDown(self):
         downloader._cache.clear()
@@ -103,6 +109,64 @@ class TestDownloaderModule(unittest.TestCase):
         self.assertEqual(import_module.call_count, 1)
 
 
+class TestDownloaderConfig(unittest.TestCase):
+
+    def setUp(self):
+        config.clear()
+
+    def tearDown(self):
+        config.clear()
+
+    def test_default_http(self):
+        job = FakeJob()
+        extr = job.extractor
+        dl = downloader.find("http")(job)
+
+        self.assertEqual(dl.adjust_extension, True)
+        self.assertEqual(dl.chunk_size, 32768)
+        self.assertEqual(dl.metadata, None)
+        self.assertEqual(dl.progress, 3.0)
+        self.assertEqual(dl.validate, True)
+        self.assertEqual(dl.headers, None)
+        self.assertEqual(dl.minsize, None)
+        self.assertEqual(dl.maxsize, None)
+        self.assertEqual(dl.mtime, True)
+        self.assertEqual(dl.rate, None)
+        self.assertEqual(dl.part, True)
+        self.assertEqual(dl.partdir, None)
+
+        self.assertIs(dl.interval_429, extr._interval_429)
+        self.assertIs(dl.retry_codes, extr._retry_codes)
+        self.assertIs(dl.retries, extr._retries)
+        self.assertIs(dl.timeout, extr._timeout)
+        self.assertIs(dl.proxies, extr._proxies)
+        self.assertIs(dl.verify, extr._verify)
+
+    def test_config_http(self):
+        config.set((), "rate", 42)
+        config.set((), "mtime", False)
+        config.set((), "headers", {"foo": "bar"})
+        config.set(("downloader",), "retries", -1)
+        config.set(("downloader", "http"), "filesize-min", "10k")
+        config.set(("extractor", "generic"), "verify", False)
+        config.set(("extractor", "generic", "example.org"), "timeout", 10)
+        config.set(("extractor", "generic", "http"), "part", False)
+        config.set(
+            ("extractor", "generic", "example.org", "http"), "headers", {})
+
+        job = FakeJob()
+        dl = downloader.find("http")(job)
+
+        self.assertEqual(dl.headers, {"foo": "bar"})
+        self.assertEqual(dl.minsize, 10240)
+        self.assertEqual(dl.retries, float("inf"))
+        self.assertEqual(dl.timeout, 10)
+        self.assertEqual(dl.verify, False)
+        self.assertEqual(dl.mtime, False)
+        self.assertEqual(dl.rate(), 42)
+        self.assertEqual(dl.part, False)
+
+
 class TestDownloaderBase(unittest.TestCase):
 
     @classmethod
@@ -119,7 +183,7 @@ class TestDownloaderBase(unittest.TestCase):
 
     @classmethod
     def _prepare_destination(cls, content=None, part=True, extension=None):
-        name = "file-{}".format(cls.fnum)
+        name = f"file-{cls.fnum}"
         cls.fnum += 1
 
         kwdict = {
@@ -135,9 +199,9 @@ class TestDownloaderBase(unittest.TestCase):
         pathfmt.build_path()
 
         if content:
-            mode = "w" + ("b" if isinstance(content, bytes) else "")
-            with pathfmt.open(mode) as file:
-                file.write(content)
+            mode = "wb" if isinstance(content, bytes) else "w"
+            with pathfmt.open(mode) as fp:
+                fp.write(content)
 
         return pathfmt
 
@@ -147,12 +211,12 @@ class TestDownloaderBase(unittest.TestCase):
         success = self.downloader.download(url, pathfmt)
 
         # test successful download
-        self.assertTrue(success, "downloading '{}' failed".format(url))
+        self.assertTrue(success, f"downloading '{url}' failed")
 
         # test content
-        mode = "r" + ("b" if isinstance(output, bytes) else "")
-        with pathfmt.open(mode) as file:
-            content = file.read()
+        mode = "rb" if isinstance(output, bytes) else "r"
+        with pathfmt.open(mode) as fp:
+            content = fp.read()
         self.assertEqual(content, output)
 
         # test filename extension
@@ -181,16 +245,16 @@ class TestHTTPDownloader(TestDownloaderBase):
             server = http.server.HTTPServer((host, port), HttpRequestHandler)
         except OSError as exc:
             raise unittest.SkipTest(
-                "cannot spawn local HTTP server ({})".format(exc))
+                f"cannot spawn local HTTP server ({exc})")
 
         host, port = server.server_address
-        cls.address = "http://{}:{}".format(host, port)
+        cls.address = f"http://{host}:{port}"
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
     def _run_test(self, ext, input, output,
                   extension, expected_extension=None):
         TestDownloaderBase._run_test(
-            self, self.address + "/" + ext, input, output,
+            self, f"{self.address}/{ext}", input, output,
             extension, expected_extension)
 
     def tearDown(self):
@@ -217,7 +281,7 @@ class TestHTTPDownloader(TestDownloaderBase):
         self._run_test("gif", None, DATA["gif"], "jpg", "gif")
 
     def test_http_filesize_min(self):
-        url = self.address + "/gif"
+        url = f"{self.address}/gif"
         pathfmt = self._prepare_destination(None, extension=None)
         self.downloader.minsize = 100
         with self.assertLogs(self.downloader.log, "WARNING"):
@@ -226,13 +290,22 @@ class TestHTTPDownloader(TestDownloaderBase):
         self.assertEqual(pathfmt.temppath, "")
 
     def test_http_filesize_max(self):
-        url = self.address + "/jpg"
+        url = f"{self.address}/jpg"
         pathfmt = self._prepare_destination(None, extension=None)
         self.downloader.maxsize = 100
         with self.assertLogs(self.downloader.log, "WARNING"):
             success = self.downloader.download(url, pathfmt)
         self.assertTrue(success)
         self.assertEqual(pathfmt.temppath, "")
+
+    def test_http_empty(self):
+        url = f"{self.address}/~NUL"
+        pathfmt = self._prepare_destination(None, extension=None)
+        with self.assertLogs(self.downloader.log, "WARNING") as log_info:
+            success = self.downloader.download(url, pathfmt)
+        self.assertFalse(success)
+        self.assertEqual(log_info.output[0],
+                         "WARNING:downloader.http:Empty file")
 
 
 class TestTextDownloader(TestDownloaderBase):
@@ -268,10 +341,10 @@ class HttpRequestHandler(http.server.BaseHTTPRequestHandler):
             status = 206
 
             match = re.match(r"bytes=(\d+)-", self.headers["Range"])
-            start = int(match.group(1))
+            start = int(match[1])
 
-            headers["Content-Range"] = "bytes {}-{}/{}".format(
-                start, len(output)-1, len(output))
+            headers["Content-Range"] = \
+                f"bytes {start}-{len(output) - 1}/{len(output)}"
             output = output[start:]
         else:
             status = 200
@@ -305,6 +378,8 @@ SAMPLES = {
     ("heic", b"????ftypheis"),
     ("heic", b"????ftypheix"),
     ("svg" , b"<?xml"),
+    ("html", b"<!DOCTYPE html><html>...</html>"),
+    ("html", b"  \n  \n\r\t\n  <!DOCTYPE html><html>...</html>"),
     ("ico" , b"\x00\x00\x01\x00"),
     ("cur" , b"\x00\x00\x02\x00"),
     ("psd" , b"8BPS"),
@@ -320,6 +395,10 @@ SAMPLES = {
     ("mp3" , b"\xFF\xFB"),
     ("mp3" , b"\xFF\xF3"),
     ("mp3" , b"\xFF\xF2"),
+    ("aac" , b"\xFF\xF9"),
+    ("aac" , b"\xFF\xF1"),
+    ("m3u8", b"#EXTM3U\n#EXT-X-STREAM-INF:PROGRAM-ID=1, BANDWIDTH=200000"),
+    ("mpd" , b'<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"'),
     ("zip" , b"PK\x03\x04"),
     ("zip" , b"PK\x05\x06"),
     ("zip" , b"PK\x07\x08"),
@@ -332,6 +411,7 @@ SAMPLES = {
     ("blend", b"BLENDER-v303RENDH"),
     ("obj" , b"# Blender v3.2.0 OBJ File: 'foo.blend'"),
     ("clip", b"CSFCHUNK\x00\x00\x00\x00"),
+    ("~NUL", b""),
 }
 
 
@@ -342,7 +422,7 @@ for ext, content in SAMPLES:
         DATA[ext] = content
 
 for idx, (_, content) in enumerate(SAMPLES):
-    DATA["S{:>02}".format(idx)] = content
+    DATA[f"S{idx:>02}"] = content
 
 
 # reverse mime types mapping
@@ -355,13 +435,14 @@ MIME_TYPES = {
 def generate_tests():
     def generate_test(idx, ext, content):
         def test(self):
-            self._run_test("S{:>02}".format(idx), None, content, "bin", ext)
-        test.__name__ = "test_http_ext_{:>02}_{}".format(idx, ext)
+            self._run_test(f"S{idx:>02}", None, content, "bin", ext)
+        test.__name__ = f"test_http_ext_{idx:>02}_{ext}"
         return test
 
     for idx, (ext, content) in enumerate(SAMPLES):
-        test = generate_test(idx, ext, content)
-        setattr(TestHTTPDownloader, test.__name__, test)
+        if ext[0].isalnum():
+            test = generate_test(idx, ext, content)
+            setattr(TestHTTPDownloader, test.__name__, test)
 
 
 generate_tests()

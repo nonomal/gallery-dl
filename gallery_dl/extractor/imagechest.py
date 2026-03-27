@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # Copyright 2020 Leonid "Bepis" Pavel
-# Copyright 2023 Mike Fährmann
+# Copyright 2023-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -10,7 +10,7 @@
 """Extractors for https://imgchest.com/"""
 
 from .common import GalleryExtractor, Extractor, Message
-from .. import text, exception
+from .. import text, util
 
 BASE_PATTERN = r"(?:https?://)?(?:www\.)?imgchest\.com"
 
@@ -23,66 +23,54 @@ class ImagechestGalleryExtractor(GalleryExtractor):
     example = "https://imgchest.com/p/abcdefghijk"
 
     def __init__(self, match):
-        self.gallery_id = match.group(1)
+        self.gallery_id = match[1]
         url = self.root + "/p/" + self.gallery_id
         GalleryExtractor.__init__(self, match, url)
 
     def _init(self):
-        access_token = self.config("access-token")
-        if access_token:
+        if access_token := self.config("access-token"):
             self.api = ImagechestAPI(self, access_token)
-            self.gallery_url = None
+            self.page_url = None
             self.metadata = self._metadata_api
-            self.images = self._images_api
 
     def metadata(self, page):
-        if "Sorry, but the page you requested could not be found." in page:
-            raise exception.NotFoundError("gallery")
+        try:
+            data = util.json_loads(text.unescape(text.extr(
+                page, 'data-page="', '"')))
+            post = data["props"]["post"]
+        except Exception:
+            if "<title>Not Found</title>" in page:
+                raise self.exc.NotFoundError("gallery")
+            self.files = ()
+            return {}
 
-        return {
-            "gallery_id": self.gallery_id,
-            "title": text.unescape(text.extr(
-                page, 'property="og:title" content="', '"').strip())
-        }
+        self.files = post.pop("files", ())
+        post["gallery_id"] = self.gallery_id
+        post["tags"] = [tag["name"] for tag in post["tags"]]
 
-    def images(self, page):
-        if ' load-all">' in page:
-            url = "{}/p/{}/loadAll".format(self.root, self.gallery_id)
-            headers = {
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin"          : self.root,
-                "Referer"         : self.gallery_url,
-            }
-            csrf_token = text.extr(page, 'name="csrf-token" content="', '"')
-            data = {"_token": csrf_token}
-            page += self.request(
-                url, method="POST", headers=headers, data=data).text
-
-        return [
-            (url, None)
-            for url in text.extract_iter(page, 'data-url="', '"')
-        ]
+        return post
 
     def _metadata_api(self, page):
         post = self.api.post(self.gallery_id)
 
-        post["date"] = text.parse_datetime(
-            post["created"], "%Y-%m-%dT%H:%M:%S.%fZ")
+        post["date"] = self.parse_datetime_iso(post["created"])
         for img in post["images"]:
-            img["date"] = text.parse_datetime(
-                img["created"], "%Y-%m-%dT%H:%M:%S.%fZ")
+            img["date"] = self.parse_datetime_iso(img["created"])
 
         post["gallery_id"] = self.gallery_id
         post.pop("image_count", None)
-        self._image_list = post.pop("images")
+        self.files = post.pop("images")
 
         return post
 
-    def _images_api(self, page):
-        return [
-            (img["link"], img)
-            for img in self._image_list
-        ]
+    def images(self, page):
+        try:
+            return [
+                (file["link"], file)
+                for file in self.files
+            ]
+        except Exception:
+            return ()
 
 
 class ImagechestUserExtractor(Extractor):
@@ -93,10 +81,6 @@ class ImagechestUserExtractor(Extractor):
     pattern = BASE_PATTERN + r"/u/([^/?#]+)"
     example = "https://imgchest.com/u/USER"
 
-    def __init__(self, match):
-        Extractor.__init__(self, match)
-        self.user = match.group(1)
-
     def items(self):
         url = self.root + "/api/posts"
         params = {
@@ -104,14 +88,17 @@ class ImagechestUserExtractor(Extractor):
             "sort"    : "new",
             "tag"     : "",
             "q"       : "",
-            "username": text.unquote(self.user),
+            "username": text.unquote(self.groups[0]),
             "nsfw"    : "true",
         }
 
         while True:
             try:
-                data = self.request(url, params=params).json()["data"]
+                data = self.request_json(url, params=params)["data"]
             except (TypeError, KeyError):
+                return
+
+            if not data:
                 return
 
             for gallery in data:
@@ -155,11 +142,12 @@ class ImagechestAPI():
                 return response.json()["data"]
 
             elif response.status_code < 400:
-                raise exception.AuthenticationError("Invalid API access token")
+                raise self.extractor.exc.AuthenticationError(
+                    "Invalid API access token")
 
             elif response.status_code == 429:
                 self.extractor.wait(seconds=600)
 
             else:
                 self.extractor.log.debug(response.text)
-                raise exception.StopExtraction("API request failed")
+                raise self.extractor.exc.AbortExtraction("API request failed")

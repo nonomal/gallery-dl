@@ -134,7 +134,7 @@ __tests__ = (
     "#url"     : "https://www.imagefap.com/usergallery.php?userid=1981976&folderid=409758",
     "#category": ("", "imagefap", "folder"),
     "#class"   : imagefap.ImagefapFolderExtractor,
-    "#urls"    : "https://www.imagefap.com/gallery/7876223",
+    "#results" : "https://www.imagefap.com/gallery/7876223",
 
     "folder"    : "Softcore",
     "gallery_id": "7876223",
@@ -205,6 +205,27 @@ __tests__ = (
 {
     "#url"     : "https://beta.imagefap.com/profile.php?user=BdRachel",
     "#category": ("", "imagefap", "user"),
+    "#class"   : imagefap.ImagefapUserExtractor,
+},
+
+{
+    "#url"     : "https://www.imagefap.com/profile/brookdale",
+    "#comment" : "multiple pagea (#9016)",
+    "#class"   : imagefap.ImagefapUserExtractor,
+    "#pattern" : imagefap.ImagefapFolderExtractor.pattern,
+    "#range"   : "1-100",
+    "#count"   : 100,
+},
+
+{
+    "#url"     : "https://www.imagefap.com/profile/Tiffany_and_me",
+    "#comment" : "empty profile (#9034)",
+    "#class"   : imagefap.ImagefapUserExtractor,
+    "#count"   : 0,
+},
+
+{
+    "#url"     : "https://www.imagefap.com/profile/Tiffany_and_me/galleries?folderid=0",
     "#class"   : imagefap.ImagefapUserExtractor,
 },
 

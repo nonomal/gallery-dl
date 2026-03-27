@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2023 Mike Fährmann
+# Copyright 2015-2026 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -8,15 +8,12 @@
 
 """Extractors for https://www.deviantart.com/"""
 
-from .common import Extractor, Message
-from .. import text, util, exception
-from ..cache import cache, memcache
+from .common import Extractor, Message, Dispatch
+from .. import text, util, dt
 import collections
-import itertools
 import mimetypes
 import binascii
 import time
-import re
 
 BASE_PATTERN = (
     r"(?:https?://)?(?:"
@@ -32,13 +29,13 @@ class DeviantartExtractor(Extractor):
     root = "https://www.deviantart.com"
     directory_fmt = ("{category}", "{username}")
     filename_fmt = "{category}_{index}_{title}.{extension}"
-    cookies_domain = None
+    cookies_domain = ".deviantart.com"
     cookies_names = ("auth", "auth_secure", "userinfo")
     _last_request = 0
 
     def __init__(self, match):
         Extractor.__init__(self, match)
-        self.user = (match.group(1) or match.group(2) or "").lower()
+        self.user = (match[1] or match[2] or "").lower()
         self.offset = 0
 
     def _init(self):
@@ -46,17 +43,18 @@ class DeviantartExtractor(Extractor):
         self.flat = self.config("flat", True)
         self.extra = self.config("extra", False)
         self.quality = self.config("quality", "100")
-        self.original = self.config("original", True)
+        self.original = self.config("original", False)
+        self.previews = self.config("previews", False)
         self.intermediary = self.config("intermediary", True)
         self.comments_avatars = self.config("comments-avatars", False)
         self.comments = self.comments_avatars or self.config("comments", False)
 
         self.api = DeviantartOAuthAPI(self)
+        self.eclipse_api = None
         self.group = False
         self._premium_cache = {}
 
-        unwatch = self.config("auto-unwatch")
-        if unwatch:
+        if self.config("auto-unwatch"):
             self.unwatch = []
             self.finalize = self._unwatch_premium
         else:
@@ -65,16 +63,26 @@ class DeviantartExtractor(Extractor):
         if self.quality:
             if self.quality == "png":
                 self.quality = "-fullview.png?"
-                self.quality_sub = re.compile(r"-fullview\.[a-z0-9]+\?").sub
+                self.quality_sub = text.re(r"-fullview\.[a-z0-9]+\?").sub
             else:
-                self.quality = ",q_{}".format(self.quality)
-                self.quality_sub = re.compile(r",q_\d+").sub
+                self.quality = ",q_" + str(self.quality)
+                self.quality_sub = text.re(r",q_\d+").sub
 
-        if self.original != "image":
-            self._update_content = self._update_content_default
-        else:
-            self._update_content = self._update_content_image
+        if self.intermediary:
+            self.intermediary_subn = text.re(r"(/f/[^/]+/[^/]+)/v\d+/.*").subn
+        self.blur_sub = text.re(r",blur_\d+").sub
+
+        if isinstance(self.original, str) and \
+                self.original.lower().startswith("image"):
             self.original = True
+            self._update_content = self._update_content_image
+        else:
+            self._update_content = self._update_content_default
+
+        if self.previews == "all":
+            self.previews_images = self.previews = True
+        else:
+            self.previews_images = False
 
         journals = self.config("journals", "html")
         if journals == "html":
@@ -94,7 +102,7 @@ class DeviantartExtractor(Extractor):
                 return response
             self.wait(seconds=300, reason="CloudFront block")
 
-    def skip(self, num):
+    def skip_files(self, num):
         self.offset += num
         return num
 
@@ -104,20 +112,51 @@ class DeviantartExtractor(Extractor):
 
         username, password = self._get_auth_info()
         if username:
-            self.cookies_update(_login_impl(self, username, password))
+            self.cookies_update(self.cache(
+                self._login_impl, username, password,
+                _exp=28*86400, _mem=False))
             return True
+
+    def _login_impl(self, username, password):
+        self.log.info("Logging in as %s", username)
+
+        url = "https://www.deviantart.com/users/login"
+        page = self.request(url).text
+
+        data = {}
+        for item in text.extract_iter(
+                page, '<input type="hidden" name="', '"/>'):
+            name, _, value = item.partition('" value="')
+            data[name] = value
+
+        challenge = data.get("challenge")
+        if challenge and challenge != "0":
+            self.log.warning("Login requires solving a CAPTCHA")
+            self.log.debug(challenge)
+
+        data["username"] = username
+        data["password"] = password
+        data["remember"] = "on"
+
+        self.sleep(2.0, "login")
+        url = "https://www.deviantart.com/_sisu/do/signin"
+        response = self.request(url, method="POST", data=data)
+
+        if not response.history:
+            raise self.exc.AuthenticationError()
+
+        return {cookie.name: cookie.value
+                for cookie in self.cookies}
 
     def items(self):
         if self.user:
-            group = self.config("group", True)
-            if group:
-                user = _user_details(self, self.user)
-                if user:
+            if group := self.config("group", True):
+                if user := self.cache(self._user_details, self.user):
                     self.user = user["username"]
                     self.group = False
                 elif group == "skip":
                     self.log.info("Skipping group '%s'", self.user)
-                    raise exception.StopExtraction()
+                    raise self.exc.AbortExtraction()
                 else:
                     self.subcategory = "group-" + self.subcategory
                     self.group = True
@@ -148,13 +187,13 @@ class DeviantartExtractor(Extractor):
                 deviation.update(data)
 
             self.prepare(deviation)
-            yield Message.Directory, deviation
+            yield Message.Directory, "", deviation
 
             if "content" in deviation:
                 content = self._extract_content(deviation)
                 yield self.commit(deviation, content)
 
-            elif deviation["is_downloadable"]:
+            elif self.original and deviation["is_downloadable"]:
                 content = self.api.deviation_download(deviation["deviationid"])
                 deviation["is_original"] = True
                 yield self.commit(deviation, content)
@@ -170,14 +209,7 @@ class DeviantartExtractor(Extractor):
                 yield self.commit(deviation, deviation["flash"])
 
             if self.commit_journal:
-                if "excerpt" in deviation:
-                    journal = self.api.deviation_content(
-                        deviation["deviationid"])
-                elif "body" in deviation:
-                    journal = {"html": deviation.pop("body")}
-                else:
-                    journal = None
-                if journal:
+                if journal := self._extract_journal(deviation):
                     if self.extra:
                         deviation["_journal"] = journal["html"]
                     deviation["is_original"] = True
@@ -191,11 +223,24 @@ class DeviantartExtractor(Extractor):
                         self.log.debug(
                             "Skipping avatar of '%s' (default)", name)
                         continue
-                    _user_details.update(name, user)
+                    self.cache_update(
+                        self._user_details, name, user, _mem=True)
 
-                    url = "{}/{}/avatar/".format(self.root, name)
+                    url = f"{self.root}/{name}/avatar/"
                     comment["_extractor"] = DeviantartAvatarExtractor
                     yield Message.Queue, url, comment
+
+            if self.previews and "preview" in deviation:
+                preview = deviation["preview"]
+                deviation["is_preview"] = True
+                if self.previews_images:
+                    yield self.commit(deviation, preview)
+                else:
+                    mtype = mimetypes.guess_type(
+                        "a." + deviation["extension"], False)[0]
+                    if mtype and not mtype.startswith("image/"):
+                        yield self.commit(deviation, preview)
+                del deviation["is_preview"]
 
             if not self.extra:
                 continue
@@ -212,7 +257,7 @@ class DeviantartExtractor(Extractor):
                 if txt is None:
                     continue
                 for match in DeviantartStashExtractor.pattern.finditer(txt):
-                    url = text.ensure_http_scheme(match.group(0))
+                    url = text.ensure_http_scheme(match[0])
                     deviation["_extractor"] = DeviantartStashExtractor
                     yield Message.Queue, url, deviation
 
@@ -228,7 +273,7 @@ class DeviantartExtractor(Extractor):
                 )):
                     filename = deviation["content"]["src"].split("/")[5]
                     deviation["index_base36"] = filename.partition("-")[0][1:]
-                    deviation["index"] = id_from_base36(
+                    deviation["index"] = util.b36decode(
                         deviation["index_base36"])
                 else:
                     deviation["index"] = text.parse_int(
@@ -237,7 +282,7 @@ class DeviantartExtractor(Extractor):
                 deviation["index"] = 0
                 deviation["index_base36"] = "0"
         if "index_base36" not in deviation:
-            deviation["index_base36"] = base36_from_id(deviation["index"])
+            deviation["index_base36"] = util.b36encode(deviation["index"])
 
         if self.user:
             deviation["username"] = self.user
@@ -246,10 +291,9 @@ class DeviantartExtractor(Extractor):
             deviation["username"] = deviation["author"]["username"]
             deviation["_username"] = deviation["username"].lower()
 
-        deviation["da_category"] = deviation["category"]
         deviation["published_time"] = text.parse_int(
             deviation["published_time"])
-        deviation["date"] = text.parse_timestamp(
+        deviation["date"] = self.parse_timestamp(
             deviation["published_time"])
 
         if self.comments:
@@ -259,15 +303,14 @@ class DeviantartExtractor(Extractor):
             )
 
         # filename metadata
-        sub = re.compile(r"\W").sub
+        sub = text.re(r"\W").sub
         deviation["filename"] = "".join((
             sub("_", deviation["title"].lower()), "_by_",
             sub("_", deviation["author"]["username"].lower()), "-d",
             deviation["index_base36"],
         ))
 
-    @staticmethod
-    def commit(deviation, target):
+    def commit(self, deviation, target):
         url = target["src"]
         name = target.get("filename") or url
         target = target.copy()
@@ -283,7 +326,11 @@ class DeviantartExtractor(Extractor):
         url = deviation["url"]
         thumbs = deviation.get("thumbs") or deviation.get("files")
         html = journal["html"]
-        shadow = SHADOW_TEMPLATE.format_map(thumbs[0]) if thumbs else ""
+        tmpl = self.utils("journal")
+        shadow = tmpl.SHADOW.format_map(thumbs[0]) if thumbs else ""
+
+        if not html:
+            self.log.warning("%s: Empty journal content", deviation["index"])
 
         if "css" in journal:
             css, cls = journal["css"], "withskin"
@@ -296,53 +343,44 @@ class DeviantartExtractor(Extractor):
 
         if html.find('<div class="boxtop journaltop">', 0, 250) != -1:
             needle = '<div class="boxtop journaltop">'
-            header = HEADER_CUSTOM_TEMPLATE.format(
+            header = tmpl.HEADER_CUSTOM.format(
                 title=title, url=url, date=deviation["date"],
             )
         else:
             needle = '<div usr class="gr">'
-            catlist = deviation["category_path"].split("/")
-            categories = " / ".join(
-                ('<span class="crumb"><a href="{}/{}/"><span>{}</span></a>'
-                 '</span>').format(self.root, cpath, cat.capitalize())
-                for cat, cpath in zip(
-                    catlist,
-                    itertools.accumulate(catlist, lambda t, c: t + "/" + c)
-                )
-            )
             username = deviation["author"]["username"]
             urlname = deviation.get("username") or username.lower()
-            header = HEADER_TEMPLATE.format(
+            header = tmpl.HEADER.format(
                 title=title,
                 url=url,
-                userurl="{}/{}/".format(self.root, urlname),
+                userurl=f"{self.root}/{urlname}/",
                 username=username,
                 date=deviation["date"],
-                categories=categories,
             )
 
         if needle in html:
             html = html.replace(needle, header, 1)
         else:
-            html = JOURNAL_TEMPLATE_HTML_EXTRA.format(header, html)
+            html = tmpl.HTML_EXTRA.format(header, html)
 
-        html = JOURNAL_TEMPLATE_HTML.format(
+        html = tmpl.HTML.format(
             title=title, html=html, shadow=shadow, css=css, cls=cls)
 
         deviation["extension"] = "htm"
         return Message.Url, html, deviation
 
-    @staticmethod
-    def _commit_journal_text(deviation, journal):
+    def _commit_journal_text(self, deviation, journal):
         html = journal["html"]
-        if html.startswith("<style"):
+        if not html:
+            self.log.warning("%s: Empty journal content", deviation["index"])
+        elif html.startswith("<style"):
             html = html.partition("</style>")[2]
         head, _, tail = html.rpartition("<script")
         content = "\n".join(
             text.unescape(text.remove_html(txt))
             for txt in (head or tail).split("<br />")
         )
-        txt = JOURNAL_TEMPLATE_TEXT.format(
+        txt = self.utils("journal").TEXT.format(
             title=deviation["title"],
             username=deviation["author"]["username"],
             date=deviation["date"],
@@ -351,6 +389,62 @@ class DeviantartExtractor(Extractor):
 
         deviation["extension"] = "txt"
         return Message.Url, txt, deviation
+
+    def _extract_journal(self, deviation):
+        if "excerpt" in deviation:
+            # # empty 'html'
+            #  return self.api.deviation_content(deviation["deviationid"])
+
+            if "_page" in deviation:
+                page = deviation["_page"]
+                del deviation["_page"]
+            else:
+                page = self._limited_request(deviation["url"]).text
+
+            # extract journal html from webpage
+            html = text.extr(
+                page,
+                "<h2>Literature Text</h2></span><div>",
+                "</div></section></div></div>")
+            if html:
+                return {"html": html}
+
+            self.log.debug("%s: Failed to extract journal HTML from webpage. "
+                           "Falling back to __INITIAL_STATE__ markup.",
+                           deviation["index"])
+
+            # parse __INITIAL_STATE__ as fallback
+            state = util.json_loads(text.extr(
+                page, 'window.__INITIAL_STATE__ = JSON.parse("', '");')
+                .replace("\\\\", "\\").replace("\\'", "'").replace('\\"', '"'))
+            deviations = state["@@entities"]["deviation"]
+            content = deviations.popitem()[1]["textContent"]
+
+            if html := self._textcontent_to_html(deviation, content):
+                return {"html": html}
+            return {"html": content["excerpt"].replace("\n", "<br />")}
+
+        if "body" in deviation:
+            return {"html": deviation.pop("body")}
+        return None
+
+    def _textcontent_to_html(self, deviation, content):
+        html = content["html"]
+        markup = html.get("markup")
+
+        if not markup or markup[0] != "{":
+            return markup
+
+        if html["type"] == "tiptap":
+            try:
+                return self.utils("tiptap").to_html(markup)
+            except Exception as exc:
+                self.log.traceback(exc)
+                self.log.error("%s: '%s: %s'", deviation["index"],
+                               exc.__class__.__name__, exc)
+
+        self.log.warning("%s: Unsupported '%s' markup.",
+                         deviation["index"], html["type"])
 
     def _extract_content(self, deviation):
         content = deviation["content"]
@@ -366,8 +460,7 @@ class DeviantartExtractor(Extractor):
         if content["src"].startswith("https://images-wixmp-"):
             if self.intermediary and deviation["index"] <= 790677560:
                 # https://github.com/r888888888/danbooru/issues/4069
-                intermediary, count = re.subn(
-                    r"(/f/[^/]+/[^/]+)/v\d+/.*",
+                intermediary, count = self.intermediary_subn(
                     r"/intermediary\1", content["src"], 1)
                 if count:
                     deviation["is_original"] = False
@@ -376,32 +469,42 @@ class DeviantartExtractor(Extractor):
             if self.quality:
                 content["src"] = self.quality_sub(
                     self.quality, content["src"], 1)
+            content["src"] = self.blur_sub("", content["src"], 1)
 
         return content
 
-    @staticmethod
-    def _find_folder(folders, name, uuid):
+    def _find_folder(self, folders, name, uuid):
         if uuid.isdecimal():
-            match = re.compile(name.replace(
-                "-", r"[^a-z0-9]+") + "$", re.IGNORECASE).match
+            match = text.re(
+                "(?i)" + name.replace("-", "[^a-z0-9]+") + "$").match
             for folder in folders:
                 if match(folder["name"]):
                     return folder
+                elif folder.get("has_subfolders"):
+                    for subfolder in folder["subfolders"]:
+                        if match(subfolder["name"]):
+                            return subfolder
         else:
             for folder in folders:
                 if folder["folderid"] == uuid:
                     return folder
-        raise exception.NotFoundError("folder")
+                elif folder.get("has_subfolders"):
+                    for subfolder in folder["subfolders"]:
+                        if subfolder["folderid"] == uuid:
+                            return subfolder
+        raise self.exc.NotFoundError("folder")
 
     def _folder_urls(self, folders, category, extractor):
-        base = "{}/{}/{}/".format(self.root, self.user, category)
+        base = f"{self.root}/{self.user}/{category}/"
         for folder in folders:
             folder["_extractor"] = extractor
-            url = "{}{}/{}".format(base, folder["folderid"], folder["name"])
+            url = f"{base}{folder['folderid']}/{folder['name']}"
             yield url, folder
 
     def _update_content_default(self, deviation, content):
-        if "premium_folder_data" in deviation or deviation.get("is_mature"):
+        if "premium_folder_data" in deviation or \
+                "tier_access" in deviation or \
+                deviation.get("is_mature"):
             public = False
         else:
             public = None
@@ -440,13 +543,10 @@ class DeviantartExtractor(Extractor):
 
         deviation["_fallback"] = (content["src"],)
         deviation["is_original"] = True
+        pl = binascii.b2a_base64(payload).rstrip(b'=\n').decode()
         content["src"] = (
-            "{}?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.{}.".format(
-                url,
-                #  base64 of 'header' is precomputed as 'eyJ0eX...'
-                #  binascii.b2a_base64(header).rstrip(b"=\n").decode(),
-                binascii.b2a_base64(payload).rstrip(b"=\n").decode())
-        )
+            # base64 of 'header' is precomputed as 'eyJ0eX...'
+            f"{url}?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.{pl}.")
 
     def _extract_comments(self, target_id, target_type="deviation"):
         results = None
@@ -522,9 +622,9 @@ class DeviantartExtractor(Extractor):
                 username, folder["gallery_id"], public=False):
             cache[dev["deviationid"]] = dev if has_access else None
 
-        return cache[deviation["deviationid"]]
+        return cache.get(deviation["deviationid"])
 
-    def _unwatch_premium(self):
+    def _unwatch_premium(self, _=None):
         for username in self.unwatch:
             self.log.info("Unwatching %s", username)
             self.api.user_friends_unwatch(username)
@@ -539,20 +639,25 @@ class DeviantartExtractor(Extractor):
             )["deviation"]["extended"]["deviationUuid"]
             yield self.api.deviation(deviation_uuid)
 
+    def _unescape_json(self, json):
+        return json.replace('\\"', '"') \
+                   .replace("\\'", "'") \
+                   .replace("\\\\", "\\")
 
-class DeviantartUserExtractor(DeviantartExtractor):
+    def _user_details(self, name):
+        try:
+            return self.cache(self.api.user_profile, name)["user"]
+        except Exception:
+            return None
+
+
+class DeviantartUserExtractor(Dispatch, DeviantartExtractor):
     """Extractor for an artist's user profile"""
-    subcategory = "user"
     pattern = BASE_PATTERN + r"/?$"
     example = "https://www.deviantart.com/USER"
 
-    def initialize(self):
-        pass
-
-    skip = Extractor.skip
-
     def items(self):
-        base = "{}/{}/".format(self.root, self.user)
+        base = f"{self.root}/{self.user}/"
         return self._dispatch_extractors((
             (DeviantartAvatarExtractor    , base + "avatar"),
             (DeviantartBackgroundExtractor, base + "banner"),
@@ -571,13 +676,15 @@ class DeviantartGalleryExtractor(DeviantartExtractor):
     """Extractor for all deviations from an artist's gallery"""
     subcategory = "gallery"
     archive_fmt = "g_{_username}_{index}.{extension}"
-    pattern = BASE_PATTERN + r"/gallery(?:/all|/?\?catpath=)?/?$"
+    pattern = (BASE_PATTERN + r"/gallery"
+               r"(?:/all|/recommended-for-you)?"
+               r"/?(\?(?!q=|catpath=scraps).*)?$")
     example = "https://www.deviantart.com/USER/gallery/"
 
     def deviations(self):
         if self.flat and not self.group:
             return self.api.gallery_all(self.user, self.offset)
-        folders = self.api.gallery_folders(self.user)
+        folders = self.cache(self.api.gallery_folders, self.user)
         return self._folder_urls(folders, "gallery", DeviantartFolderExtractor)
 
 
@@ -590,7 +697,7 @@ class DeviantartAvatarExtractor(DeviantartExtractor):
 
     def deviations(self):
         name = self.user.lower()
-        user = _user_details(self, name)
+        user = self.cache(self._user_details, name)
         if not user:
             return ()
 
@@ -616,15 +723,15 @@ class DeviantartAvatarExtractor(DeviantartExtractor):
             fmt, _, ext = fmt.rpartition(".")
             if fmt:
                 fmt = "-" + fmt
-            url = "https://a.deviantart.net/avatars{}/{}/{}/{}.{}?{}".format(
-                fmt, name[0], name[1], name, ext, index)
+            url = (f"https://a.deviantart.net/avatars{fmt}"
+                   f"/{name[0]}/{name[1]}/{name}.{ext}?{index}")
             results.append(self._make_deviation(url, user, index, fmt))
         return results
 
     def _make_deviation(self, url, user, index, fmt):
         return {
             "author"         : user,
-            "category"       : "avatar",
+            "da_category"    : "avatar",
             "index"          : text.parse_int(index),
             "is_deleted"     : False,
             "is_downloadable": False,
@@ -644,7 +751,7 @@ class DeviantartBackgroundExtractor(DeviantartExtractor):
 
     def deviations(self):
         try:
-            return (self.api.user_profile(self.user.lower())
+            return (self.cache(self.api.user_profile, self.user.lower())
                     ["cover_deviation"]["cover_deviation"],)
         except Exception:
             return ()
@@ -661,19 +768,42 @@ class DeviantartFolderExtractor(DeviantartExtractor):
     def __init__(self, match):
         DeviantartExtractor.__init__(self, match)
         self.folder = None
-        self.folder_id = match.group(3)
-        self.folder_name = match.group(4)
+        self.folder_id = match[3]
+        self.folder_name = match[4]
 
     def deviations(self):
-        folders = self.api.gallery_folders(self.user)
+        folders = self.cache(self.api.gallery_folders, self.user)
         folder = self._find_folder(folders, self.folder_name, self.folder_id)
+
+        # Leaving this here for backwards compatibility
         self.folder = {
             "title": folder["name"],
             "uuid" : folder["folderid"],
             "index": self.folder_id,
             "owner": self.user,
+            "parent_uuid": folder["parent"],
         }
-        return self.api.gallery(self.user, folder["folderid"], self.offset)
+
+        if folder.get("subfolder"):
+            self.folder["parent_folder"] = folder["parent_folder"]
+            self.archive_fmt = "F_{folder[parent_uuid]}_{index}.{extension}"
+
+            if self.flat:
+                self.directory_fmt = ("{category}", "{username}",
+                                      "{folder[parent_folder]}")
+            else:
+                self.directory_fmt = ("{category}", "{username}",
+                                      "{folder[parent_folder]}",
+                                      "{folder[title]}")
+
+        if folder.get("has_subfolders") and self.config("subfolders", True):
+            for subfolder in folder["subfolders"]:
+                subfolder["parent_folder"] = folder["name"]
+                subfolder["subfolder"] = True
+            yield from self._folder_urls(
+                folder["subfolders"], "gallery", DeviantartFolderExtractor)
+
+        yield from self.api.gallery(self.user, folder["folderid"], self.offset)
 
     def prepare(self, deviation):
         DeviantartExtractor.prepare(self, deviation)
@@ -684,45 +814,64 @@ class DeviantartStashExtractor(DeviantartExtractor):
     """Extractor for sta.sh-ed deviations"""
     subcategory = "stash"
     archive_fmt = "{index}.{extension}"
-    pattern = (r"(?:https?://)?(?:(?:www\.)?deviantart\.com/stash|sta\.sh)"
+    skip_files = None
+    pattern = (r"(?:https?://)?(?:(?:www\.)?deviantart\.com/stash|sta\.s(h))"
                r"/([a-z0-9]+)")
-    example = "https://sta.sh/abcde"
-
-    skip = Extractor.skip
+    example = "https://www.deviantart.com/stash/abcde"
 
     def __init__(self, match):
         DeviantartExtractor.__init__(self, match)
-        self.user = None
-        self.stash_id = match.group(1)
+        self.user = ""
 
-    def deviations(self, stash_id=None):
+    def deviations(self, stash_id=None, stash_data=None):
         if stash_id is None:
-            stash_id = self.stash_id
-        url = "https://sta.sh/" + stash_id
-        page = self._limited_request(url).text
+            legacy_url, stash_id = self.groups
+        else:
+            legacy_url = False
+
+        if legacy_url and stash_id[0] == "2":
+            url = "https://sta.sh/" + stash_id
+            response = self._limited_request(url)
+            stash_id = response.url.rpartition("/")[2]
+            page = response.text
+        else:
+            url = "https://www.deviantart.com/stash/" + stash_id
+            page = self._limited_request(url).text
 
         if stash_id[0] == "0":
-            uuid = text.extr(page, '//deviation/', '"')
-            if uuid:
+            if uuid := text.extr(page, '//deviation/', '"'):
                 deviation = self.api.deviation(uuid)
+                deviation["_page"] = page
                 deviation["index"] = text.parse_int(text.extr(
                     page, '\\"deviationId\\":', ','))
+
+                deviation["stash_id"] = stash_id
+                if stash_data:
+                    folder = stash_data["folder"]
+                    deviation["stash_name"] = folder["name"]
+                    deviation["stash_folder"] = folder["folderId"]
+                    deviation["stash_parent"] = folder["parentId"] or 0
+                    deviation["stash_description"] = \
+                        folder["richDescription"]["excerpt"]
+                else:
+                    deviation["stash_name"] = ""
+                    deviation["stash_description"] = ""
+                    deviation["stash_folder"] = 0
+                    deviation["stash_parent"] = 0
+
                 yield deviation
                 return
 
-        for item in text.extract_iter(
-                page, 'class="stash-thumb-container', '</div>'):
-            url = text.extr(item, '<a href="', '"')
+        if stash_data := text.extr(page, ',\\"stash\\":', ',\\"@@'):
+            if stash_data.endswith(":{}"):
+                stash_data = stash_data[:stash_data.rfind("}", None, -2)+1]
+            stash_data = util.json_loads(self._unescape_json(stash_data))
 
-            if url:
-                stash_id = url.rpartition("/")[2]
-            else:
-                stash_id = text.extr(item, 'gmi-stashid="', '"')
-                stash_id = "2" + util.bencode(text.parse_int(
-                    stash_id), "0123456789abcdefghijklmnopqrstuvwxyz")
-
-            if len(stash_id) > 2:
-                yield from self.deviations(stash_id)
+        for sid in text.extract_iter(
+                page, 'href="https://www.deviantart.com/stash/', '"'):
+            if sid == stash_id or sid.endswith("#comments"):
+                continue
+            yield from self.deviations(sid, stash_data)
 
 
 class DeviantartFavoriteExtractor(DeviantartExtractor):
@@ -736,7 +885,7 @@ class DeviantartFavoriteExtractor(DeviantartExtractor):
     def deviations(self):
         if self.flat:
             return self.api.collections_all(self.user, self.offset)
-        folders = self.api.collections_folders(self.user)
+        folders = self.cache(self.api.collections_folders, self.user)
         return self._folder_urls(
             folders, "favourites", DeviantartCollectionExtractor)
 
@@ -753,11 +902,11 @@ class DeviantartCollectionExtractor(DeviantartExtractor):
     def __init__(self, match):
         DeviantartExtractor.__init__(self, match)
         self.collection = None
-        self.collection_id = match.group(3)
-        self.collection_name = match.group(4)
+        self.collection_id = match[3]
+        self.collection_name = match[4]
 
     def deviations(self):
-        folders = self.api.collections_folders(self.user)
+        folders = self.cache(self.api.collections_folders, self.user)
         folder = self._find_folder(
             folders, self.collection_name, self.collection_id)
         self.collection = {
@@ -796,15 +945,15 @@ class DeviantartStatusExtractor(DeviantartExtractor):
 
     def deviations(self):
         for status in self.api.user_statuses(self.user, self.offset):
-            yield from self.status(status)
+            yield from self.process_status(status)
 
-    def status(self, status):
+    def process_status(self, status):
         for item in status.get("items") or ():  # do not trust is_share
             # shared deviations/statuses
             if "deviation" in item:
                 yield item["deviation"].copy()
             if "status" in item:
-                yield from self.status(item["status"].copy())
+                yield from self.process_status(item["status"].copy())
         # assume is_deleted == true means necessary fields are missing
         if status["is_deleted"]:
             self.log.warning(
@@ -829,8 +978,8 @@ class DeviantartStatusExtractor(DeviantartExtractor):
             deviation["username"] = deviation["author"]["username"]
             deviation["_username"] = deviation["username"].lower()
 
-        deviation["date"] = dt = text.parse_datetime(deviation["ts"])
-        deviation["published_time"] = int(util.datetime_to_timestamp(dt))
+        deviation["date"] = d = self.parse_datetime_iso(deviation["ts"])
+        deviation["published_time"] = int(dt.to_ts(d))
 
         deviation["da_category"] = "Status"
         deviation["category_path"] = "status"
@@ -846,55 +995,6 @@ class DeviantartStatusExtractor(DeviantartExtractor):
             )
 
 
-class DeviantartPopularExtractor(DeviantartExtractor):
-    """Extractor for popular deviations"""
-    subcategory = "popular"
-    directory_fmt = ("{category}", "Popular",
-                     "{popular[range]}", "{popular[search]}")
-    archive_fmt = "P_{popular[range]}_{popular[search]}_{index}.{extension}"
-    pattern = (r"(?:https?://)?www\.deviantart\.com/(?:"
-               r"(?:deviations/?)?\?order=(popular-[^/?#]+)"
-               r"|((?:[\w-]+/)*)(popular-[^/?#]+)"
-               r")/?(?:\?([^#]*))?")
-    example = "https://www.deviantart.com/popular-24-hours/"
-
-    def __init__(self, match):
-        DeviantartExtractor.__init__(self, match)
-        self.user = ""
-
-        trange1, path, trange2, query = match.groups()
-        query = text.parse_query(query)
-        self.search_term = query.get("q")
-
-        trange = trange1 or trange2 or query.get("order", "")
-        if trange.startswith("popular-"):
-            trange = trange[8:]
-        self.time_range = {
-            "newest"      : "now",
-            "most-recent" : "now",
-            "this-week"   : "1week",
-            "this-month"  : "1month",
-            "this-century": "alltime",
-            "all-time"    : "alltime",
-        }.get(trange, "alltime")
-
-        self.popular = {
-            "search": self.search_term or "",
-            "range" : trange or "all-time",
-            "path"  : path.strip("/") if path else "",
-        }
-
-    def deviations(self):
-        if self.time_range == "now":
-            return self.api.browse_newest(self.search_term, self.offset)
-        return self.api.browse_popular(
-            self.search_term, self.time_range, self.offset)
-
-    def prepare(self, deviation):
-        DeviantartExtractor.prepare(self, deviation)
-        deviation["popular"] = self.popular
-
-
 class DeviantartTagExtractor(DeviantartExtractor):
     """Extractor for deviations from tag searches"""
     subcategory = "tag"
@@ -905,7 +1005,8 @@ class DeviantartTagExtractor(DeviantartExtractor):
 
     def __init__(self, match):
         DeviantartExtractor.__init__(self, match)
-        self.tag = text.unquote(match.group(1))
+        self.tag = text.unquote(match[1])
+        self.user = ""
 
     def deviations(self):
         return self.api.browse_tags(self.tag, self.offset)
@@ -943,6 +1044,7 @@ class DeviantartDeviationExtractor(DeviantartExtractor):
     """Extractor for single deviations"""
     subcategory = "deviation"
     archive_fmt = "g_{_username}_{index}.{extension}"
+    skip_files = None
     pattern = (BASE_PATTERN + r"/(art|journal)/(?:[^/?#]+-)?(\d+)"
                r"|(?:https?://)?(?:www\.)?(?:fx)?deviantart\.com/"
                r"(?:view/|deviation/|view(?:-full)?\.php/*\?(?:[^#]+&)?id=)"
@@ -950,26 +1052,49 @@ class DeviantartDeviationExtractor(DeviantartExtractor):
                r"|(?:https?://)?fav\.me/d([0-9a-z]+)")  # base36
     example = "https://www.deviantart.com/UsER/art/TITLE-12345"
 
-    skip = Extractor.skip
-
-    def __init__(self, match):
-        DeviantartExtractor.__init__(self, match)
-        self.type = match.group(3)
-        self.deviation_id = \
-            match.group(4) or match.group(5) or id_from_base36(match.group(6))
-
     def deviations(self):
-        if self.user:
-            url = "{}/{}/{}/{}".format(
-                self.root, self.user, self.type or "art", self.deviation_id)
-        else:
-            url = "{}/view/{}/".format(self.root, self.deviation_id)
+        _, _, type, did1, did2, did3 = self.groups
+        deviation_id = did1 or did2 or util.b36decode(did3)
 
-        uuid = text.extr(self._limited_request(url).text,
-                         '"deviationUuid\\":\\"', '\\')
+        if self.user:
+            url = (f"{self.root}/{self.user}"
+                   f"/{type or 'art'}/{deviation_id}")
+        else:
+            url = f"{self.root}/view/{deviation_id}/"
+
+        page = self._limited_request(url, notfound=True).text
+        uuid = text.extr(page, '"deviationUuid\\":\\"', '\\')
         if not uuid:
-            raise exception.NotFoundError("deviation")
-        return (self.api.deviation(uuid),)
+            raise self.exc.NotFoundError("deviation")
+
+        deviation = self.api.deviation(uuid)
+        deviation["_page"] = page
+        deviation["index_file"] = 0
+        deviation["num"] = deviation["count"] = 1
+
+        additional_media = text.extr(page, ',\\"additionalMedia\\":', '}],\\"')
+        if not additional_media:
+            yield deviation
+            return
+
+        self.filename_fmt = ("{category}_{index}_{index_file}_{title}_"
+                             "{num:>02}.{extension}")
+        self.archive_fmt = ("g_{_username}_{index}{index_file:?_//}."
+                            "{extension}")
+
+        additional_media = util.json_loads(self._unescape_json(
+            additional_media) + "}]")
+        deviation["count"] = 1 + len(additional_media)
+        yield deviation
+
+        for index, post in enumerate(additional_media):
+            uri = eclipse_media(post["media"], "fullview")[0]
+            deviation["content"]["src"] = uri
+            deviation["num"] += 1
+            deviation["index_file"] = post["fileId"]
+            # Download only works on purchased materials - no way to check
+            deviation["is_downloadable"] = False
+            yield deviation
 
 
 class DeviantartScrapsExtractor(DeviantartExtractor):
@@ -977,7 +1102,6 @@ class DeviantartScrapsExtractor(DeviantartExtractor):
     subcategory = "scraps"
     directory_fmt = ("{category}", "{username}", "Scraps")
     archive_fmt = "s_{_username}_{index}.{extension}"
-    cookies_domain = ".deviantart.com"
     pattern = BASE_PATTERN + r"/gallery/(?:\?catpath=)?scraps\b"
     example = "https://www.deviantart.com/USER/gallery/scraps"
 
@@ -994,11 +1118,10 @@ class DeviantartSearchExtractor(DeviantartExtractor):
     subcategory = "search"
     directory_fmt = ("{category}", "Search", "{search_tags}")
     archive_fmt = "Q_{search_tags}_{index}.{extension}"
-    cookies_domain = ".deviantart.com"
+    skip_files = None
     pattern = (r"(?:https?://)?www\.deviantart\.com"
                r"/search(?:/deviations)?/?\?([^#]+)")
     example = "https://www.deviantart.com/search?q=QUERY"
-    skip = Extractor.skip
 
     def __init__(self, match):
         DeviantartExtractor.__init__(self, match)
@@ -1020,20 +1143,20 @@ class DeviantartSearchExtractor(DeviantartExtractor):
 
     def _search_html(self, params):
         url = self.root + "/search"
-
+        find = text.re(r'''href="https://www.deviantart.com/([^/?#]+)'''
+                       r'''/(art|journal)/(?:[^"]+-)?(\d+)''').findall
         while True:
             response = self.request(url, params=params)
 
             if response.history and "/users/login" in response.url:
-                raise exception.StopExtraction("HTTP redirect to login page")
+                raise self.exc.AbortExtraction("HTTP redirect to login page")
             page = response.text
 
-            for dev in DeviantartDeviationExtractor.pattern.findall(
-                    page)[2::3]:
+            for user, type, did in find(page)[:-3:3]:
                 yield {
-                    "deviationId": dev[3],
-                    "author": {"username": dev[0]},
-                    "isJournal": dev[2] == "journal",
+                    "deviationId": did,
+                    "author": {"username": user},
+                    "isJournal": type == "journal",
                 }
 
             cursor = text.extr(page, r'\"cursor\":\"', '\\',)
@@ -1046,13 +1169,12 @@ class DeviantartGallerySearchExtractor(DeviantartExtractor):
     """Extractor for deviantart gallery searches"""
     subcategory = "gallery-search"
     archive_fmt = "g_{_username}_{index}.{extension}"
-    cookies_domain = ".deviantart.com"
     pattern = BASE_PATTERN + r"/gallery/?\?(q=[^#]+)"
     example = "https://www.deviantart.com/USER/gallery?q=QUERY"
 
     def __init__(self, match):
         DeviantartExtractor.__init__(self, match)
-        self.query = match.group(3)
+        self.query = match[3]
 
     def deviations(self):
         self.login()
@@ -1077,14 +1199,14 @@ class DeviantartGallerySearchExtractor(DeviantartExtractor):
 class DeviantartFollowingExtractor(DeviantartExtractor):
     """Extractor for user's watched users"""
     subcategory = "following"
-    pattern = BASE_PATTERN + "/about#watching$"
+    pattern = BASE_PATTERN + "/(?:about#)?watching"
     example = "https://www.deviantart.com/USER/about#watching"
 
     def items(self):
-        eclipse_api = DeviantartEclipseAPI(self)
+        api = DeviantartOAuthAPI(self)
 
-        for user in eclipse_api.user_watching(self.user, self.offset):
-            url = "{}/{}".format(self.root, user["username"])
+        for user in api.user_friends(self.user):
+            url = f"{self.root}/{user['user']['username']}"
             user["_extractor"] = DeviantartUserExtractor
             yield Message.Queue, url, user
 
@@ -1095,7 +1217,7 @@ class DeviantartFollowingExtractor(DeviantartExtractor):
 class DeviantartOAuthAPI():
     """Interface for the DeviantArt OAuth API
 
-    Ref: https://www.deviantart.com/developers/http/v1/20160316
+    https://www.deviantart.com/developers/http/v1/20160316
     """
     CLIENT_ID = "5388"
     CLIENT_SECRET = "76b08c69cfb27f26d6161f9ab6d061a1"
@@ -1103,7 +1225,8 @@ class DeviantartOAuthAPI():
     def __init__(self, extractor):
         self.extractor = extractor
         self.log = extractor.log
-        self.headers = {"dA-minor-version": "20200519"}
+        self.exc = extractor.exc
+        self.headers = {"dA-minor-version": "20210526"}
         self._warn_429 = True
 
         self.delay = extractor.config("wait-min", 0)
@@ -1117,8 +1240,7 @@ class DeviantartOAuthAPI():
         self.folders = extractor.config("folders", False)
         self.public = extractor.config("public", True)
 
-        client_id = extractor.config("client-id")
-        if client_id:
+        if client_id := extractor.config("client-id"):
             self.client_id = str(client_id)
             self.client_secret = extractor.config("client-secret")
         else:
@@ -1128,13 +1250,13 @@ class DeviantartOAuthAPI():
         token = extractor.config("refresh-token")
         if token is None or token == "cache":
             token = "#" + self.client_id
-            if not _refresh_token_cache(token):
+            if not extractor.cache(_refresh_token_cache, token, _mem=False):
                 token = None
         self.refresh_token_key = token
 
         metadata = extractor.config("metadata", False)
         if not metadata:
-            metadata = bool(extractor.extra)
+            metadata = True if extractor.extra else False
         if metadata:
             self.metadata = True
 
@@ -1188,29 +1310,6 @@ class DeviantartOAuthAPI():
                   "mature_content": self.mature}
         return self._pagination(endpoint, params, public=False, unpack=True)
 
-    def browse_newest(self, query=None, offset=0):
-        """Browse newest deviations"""
-        endpoint = "/browse/newest"
-        params = {
-            "q"             : query,
-            "limit"         : 120,
-            "offset"        : offset,
-            "mature_content": self.mature,
-        }
-        return self._pagination(endpoint, params)
-
-    def browse_popular(self, query=None, timerange=None, offset=0):
-        """Yield popular deviations"""
-        endpoint = "/browse/popular"
-        params = {
-            "q"             : query,
-            "limit"         : 120,
-            "timerange"     : timerange,
-            "offset"        : offset,
-            "mature_content": self.mature,
-        }
-        return self._pagination(endpoint, params)
-
     def browse_tags(self, tag, offset=0):
         """ Browse a tag """
         endpoint = "/browse/tags"
@@ -1223,11 +1322,12 @@ class DeviantartOAuthAPI():
         return self._pagination(endpoint, params)
 
     def browse_user_journals(self, username, offset=0):
-        """Yield all journal entries of a specific user"""
-        endpoint = "/browse/user/journals"
-        params = {"username": username, "offset": offset, "limit": 50,
-                  "mature_content": self.mature, "featured": "false"}
-        return self._pagination(endpoint, params)
+        journals = filter(
+            lambda post: "/journal/" in post["url"],
+            self.user_profile_posts(username))
+        if offset:
+            journals = util.advance(journals, offset)
+        return journals
 
     def collections(self, username, folder_id, offset=0):
         """Yield all Deviation-objects contained in a collection folder"""
@@ -1243,7 +1343,6 @@ class DeviantartOAuthAPI():
                   "mature_content": self.mature}
         return self._pagination(endpoint, params)
 
-    @memcache(keyarg=1)
     def collections_folders(self, username, offset=0):
         """Yield all collection folders of a specific user"""
         endpoint = "/collections/folders"
@@ -1254,7 +1353,7 @@ class DeviantartOAuthAPI():
     def comments(self, target_id, target_type="deviation",
                  comment_id=None, offset=0):
         """Fetch comments posted on a target"""
-        endpoint = "/comments/{}/{}".format(target_type, target_id)
+        endpoint = f"/comments/{target_type}/{target_id}"
         params = {
             "commentid"     : comment_id,
             "maxdepth"      : "5",
@@ -1308,7 +1407,7 @@ class DeviantartOAuthAPI():
     def deviation_metadata(self, deviations):
         """ Fetch deviation metadata for a set of deviations"""
         endpoint = "/deviation/metadata?" + "&".join(
-            "deviationids[{}]={}".format(num, deviation["deviationid"])
+            f"deviationids[{num}]={deviation['deviationid']}"
             for num, deviation in enumerate(deviations)
         )
         return self._call(
@@ -1331,7 +1430,6 @@ class DeviantartOAuthAPI():
                   "mature_content": self.mature}
         return self._pagination(endpoint, params)
 
-    @memcache(keyarg=1)
     def gallery_folders(self, username, offset=0):
         """Yield all gallery folders of a specific user"""
         endpoint = "/gallery/folders"
@@ -1339,16 +1437,10 @@ class DeviantartOAuthAPI():
                   "mature_content": self.mature}
         return self._pagination_list(endpoint, params)
 
-    @memcache(keyarg=1)
-    def user_profile(self, username):
-        """Get user profile information"""
-        endpoint = "/user/profile/" + username
-        return self._call(endpoint, fatal=False)
-
-    def user_statuses(self, username, offset=0):
-        """Yield status updates of a specific user"""
-        endpoint = "/user/statuses/"
-        params = {"username": username, "offset": offset, "limit": 50}
+    def user_friends(self, username, offset=0):
+        """Get the users list of friends"""
+        endpoint = "/user/friends/" + username
+        params = {"limit": 50, "offset": offset, "mature_content": self.mature}
         return self._pagination(endpoint, params)
 
     def user_friends_watch(self, username):
@@ -1376,19 +1468,40 @@ class DeviantartOAuthAPI():
             endpoint, method="POST", public=False, fatal=False,
         ).get("success")
 
+    def user_profile(self, username):
+        """Get user profile information"""
+        endpoint = "/user/profile/" + username
+        return self._call(endpoint, fatal=False)
+
+    def user_profile_posts(self, username):
+        endpoint = "/user/profile/posts"
+        params = {"username": username, "limit": 50,
+                  "mature_content": self.mature}
+        return self._pagination(endpoint, params)
+
+    def user_statuses(self, username, offset=0):
+        """Yield status updates of a specific user"""
+        statuses = filter(
+            lambda post: "/status-update/" in post["url"],
+            self.user_profile_posts(username))
+        if offset:
+            statuses = util.advance(statuses, offset)
+        return statuses
+
     def authenticate(self, refresh_token_key):
         """Authenticate the application by requesting an access token"""
-        self.headers["Authorization"] = \
-            self._authenticate_impl(refresh_token_key)
+        self.headers["Authorization"] = self.extractor.cache(
+            self._authenticate_impl, refresh_token_key, _exp=3600, _mem=False)
 
-    @cache(maxage=3600, keyarg=1)
     def _authenticate_impl(self, refresh_token_key):
         """Actual authenticate implementation"""
         url = "https://www.deviantart.com/oauth2/token"
         if refresh_token_key:
             self.log.info("Refreshing private access token")
+            token = self.extractor.cache(
+                _refresh_token_cache, refresh_token_key, _mem=False)
             data = {"grant_type": "refresh_token",
-                    "refresh_token": _refresh_token_cache(refresh_token_key)}
+                    "refresh_token": token}
         else:
             self.log.info("Requesting public access token")
             data = {"grant_type": "client_credentials"}
@@ -1400,11 +1513,11 @@ class DeviantartOAuthAPI():
 
         if response.status_code != 200:
             self.log.debug("Server response: %s", data)
-            raise exception.AuthenticationError('"{}" ({})'.format(
-                data.get("error_description"), data.get("error")))
+            raise self.exc.AuthenticationError(
+                f"\"{data.get('error_description')}\" ({data.get('error')})")
         if refresh_token_key:
-            _refresh_token_cache.update(
-                refresh_token_key, data["refresh_token"])
+            self.extractor.cache_update(
+                _refresh_token_cache, refresh_token_key, data["refresh_token"])
         return "Bearer " + data["access_token"]
 
     def _call(self, endpoint, fatal=True, log=True, public=None, **kwargs):
@@ -1439,13 +1552,13 @@ class DeviantartOAuthAPI():
 
             error = data.get("error_description")
             if error == "User not found.":
-                raise exception.NotFoundError("user or group")
-            if error == "Deviation not downloadable.":
-                raise exception.AuthorizationError()
+                raise self.exc.NotFoundError("user or group")
+            if error in {"Deviation not downloadable.",
+                         "Only subscribers may have access to this download."}:
+                raise self.exc.AuthorizationError()
 
             self.log.debug(response.text)
-            msg = "API responded with {} {}".format(
-                status, response.reason)
+            msg = f"API responded with {status} {response.reason}"
             if status == 429:
                 if self.delay < 30:
                     self.delay += 1
@@ -1464,7 +1577,7 @@ class DeviantartOAuthAPI():
                     self.log.error(msg)
                 return data
 
-    def _switch_tokens(self, results, params):
+    def _should_switch_tokens(self, results, params):
         if len(results) < params["limit"]:
             return True
 
@@ -1496,7 +1609,7 @@ class DeviantartOAuthAPI():
                 results = [item["journal"] for item in results
                            if "journal" in item]
             if extend:
-                if public and self._switch_tokens(results, params):
+                if public and self._should_switch_tokens(results, params):
                     if self.refresh_token_key:
                         self.log.debug("Switching to private access token")
                         public = False
@@ -1530,6 +1643,8 @@ class DeviantartOAuthAPI():
                 return
 
             if "next_cursor" in data:
+                if not data["next_cursor"]:
+                    return
                 params["offset"] = None
                 params["cursor"] = data["next_cursor"]
             elif data["next_offset"] is not None:
@@ -1540,18 +1655,15 @@ class DeviantartOAuthAPI():
                     return
                 params["offset"] = int(params["offset"]) + len(results)
 
-    @staticmethod
-    def _shared_content(results):
+    def _pagination_list(self, endpoint, params, key="results"):
+        return list(self._pagination(endpoint, params, False, key=key))
+
+    def _shared_content(self, results):
         """Return an iterable of shared deviations in 'results'"""
         for result in results:
             for item in result.get("items") or ():
                 if "deviation" in item:
                     yield item["deviation"]
-
-    def _pagination_list(self, endpoint, params, key="results"):
-        result = []
-        result.extend(self._pagination(endpoint, params, False, key=key))
-        return result
 
     def _metadata(self, deviations):
         """Add extended metadata to each deviation object"""
@@ -1572,14 +1684,14 @@ class DeviantartOAuthAPI():
     def _folders(self, deviations):
         """Add a list of all containing folders to each deviation object"""
         for deviation in deviations:
-            deviation["folders"] = self._folders_map(
-                deviation["author"]["username"])[deviation["deviationid"]]
+            username = deviation["author"]["username"]
+            deviation["folders"] = self.extractor.cache(
+                self._folders_map, username)[deviation["deviationid"]]
 
-    @memcache(keyarg=1)
     def _folders_map(self, username):
         """Generate a deviation_id -> folders mapping for 'username'"""
         self.log.info("Collecting folder information for '%s'", username)
-        folders = self.gallery_folders(username)
+        folders = self.extractor.cache(self.gallery_folders, username)
 
         # create 'folderid'-to-'folder' mapping
         fmap = {
@@ -1669,20 +1781,6 @@ class DeviantartEclipseAPI():
         params = {"username": user}
         return self._call(endpoint, params)
 
-    def user_watching(self, user, offset=0):
-        gruserid, moduleid = self._ids_watching(user)
-
-        endpoint = "/_puppy/gruser/module/watching"
-        params = {
-            "gruserid"     : gruserid,
-            "gruser_typeid": "4",
-            "username"     : user,
-            "moduleid"     : moduleid,
-            "offset"       : offset,
-            "limit"        : 24,
-        }
-        return self._pagination(endpoint, params)
-
     def _call(self, endpoint, params):
         url = "https://www.deviantart.com" + endpoint
         params["csrf_token"] = self.csrf_token or self._fetch_csrf_token()
@@ -1726,20 +1824,6 @@ class DeviantartEclipseAPI():
             else:
                 params["offset"] = int(params["offset"]) + len(results)
 
-    def _ids_watching(self, user):
-        url = "{}/{}/about".format(self.extractor.root, user)
-        page = self.request(url).text
-
-        gruserid, pos = text.extract(page, ' data-userid="', '"')
-
-        pos = page.find('\\"type\\":\\"watching\\"', pos)
-        if pos < 0:
-            raise exception.NotFoundError("module")
-        moduleid = text.rextract(page, '\\"id\\":', ',', pos)[0].strip('" ')
-
-        self._fetch_csrf_token(page)
-        return gruserid, moduleid
-
     def _fetch_csrf_token(self, page=None):
         if page is None:
             page = self.request(self.extractor.root + "/").text
@@ -1748,173 +1832,27 @@ class DeviantartEclipseAPI():
         return token
 
 
-@memcache(keyarg=1)
-def _user_details(extr, name):
-    try:
-        return extr.api.user_profile(name)["user"]
-    except Exception:
-        return None
+def eclipse_media(media, format="preview"):
+    url = [media["baseUri"]]
+
+    formats = {
+        fmt["t"]: fmt
+        for fmt in media["types"]
+    }
+
+    if tokens := media.get("token") or ():
+        if len(tokens) <= 1:
+            fmt = formats[format]
+            if "c" in fmt:
+                url.append(fmt["c"].replace(
+                    "<prettyName>", media["prettyName"]))
+        url.append("?token=")
+        url.append(tokens[-1])
+
+    return "".join(url), formats
 
 
-@cache(maxage=36500*86400, keyarg=0)
 def _refresh_token_cache(token):
     if token and token[0] == "#":
         return None
     return token
-
-
-@cache(maxage=28*86400, keyarg=1)
-def _login_impl(extr, username, password):
-    extr.log.info("Logging in as %s", username)
-
-    url = "https://www.deviantart.com/users/login"
-    page = extr.request(url).text
-
-    data = {}
-    for item in text.extract_iter(page, '<input type="hidden" name="', '"/>'):
-        name, _, value = item.partition('" value="')
-        data[name] = value
-
-    challenge = data.get("challenge")
-    if challenge and challenge != "0":
-        extr.log.warning("Login requires solving a CAPTCHA")
-        extr.log.debug(challenge)
-
-    data["username"] = username
-    data["password"] = password
-    data["remember"] = "on"
-
-    extr.sleep(2.0, "login")
-    url = "https://www.deviantart.com/_sisu/do/signin"
-    response = extr.request(url, method="POST", data=data)
-
-    if not response.history:
-        raise exception.AuthenticationError()
-
-    return {
-        cookie.name: cookie.value
-        for cookie in extr.cookies
-    }
-
-
-def id_from_base36(base36):
-    return util.bdecode(base36, _ALPHABET)
-
-
-def base36_from_id(deviation_id):
-    return util.bencode(int(deviation_id), _ALPHABET)
-
-
-_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
-
-
-###############################################################################
-# Journal Formats #############################################################
-
-SHADOW_TEMPLATE = """
-<span class="shadow">
-    <img src="{src}" class="smshadow" width="{width}" height="{height}">
-</span>
-<br><br>
-"""
-
-HEADER_TEMPLATE = """<div usr class="gr">
-<div class="metadata">
-    <h2><a href="{url}">{title}</a></h2>
-    <ul>
-        <li class="author">
-            by <span class="name"><span class="username-with-symbol u">
-            <a class="u regular username" href="{userurl}">{username}</a>\
-<span class="user-symbol regular"></span></span></span>,
-            <span>{date}</span>
-        </li>
-        <li class="category">
-            {categories}
-        </li>
-    </ul>
-</div>
-"""
-
-HEADER_CUSTOM_TEMPLATE = """<div class='boxtop journaltop'>
-<h2>
-    <img src="https://st.deviantart.net/minish/gruzecontrol/icons/journal.gif\
-?2" style="vertical-align:middle" alt=""/>
-    <a href="{url}">{title}</a>
-</h2>
-Journal Entry: <span>{date}</span>
-"""
-
-JOURNAL_TEMPLATE_HTML = """text:<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>{title}</title>
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-css/deviantart-network_lc.css?3843780832">
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-css/group_secrets_lc.css?3250492874">
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-css/v6core_lc.css?4246581581">
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-css/sidebar_lc.css?1490570941">
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-css/writer_lc.css?3090682151">
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-css/v6loggedin_lc.css?3001430805">
-    <style>{css}</style>
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-roses/cssmin/core.css?1488405371919" >
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-roses/cssmin/peeky.css?1487067424177" >
-    <link rel="stylesheet" href="https://st.deviantart.net/\
-roses/cssmin/desktop.css?1491362542749" >
-</head>
-<body id="deviantART-v7" class="bubble no-apps loggedout w960 deviantart">
-    <div id="output">
-    <div class="dev-page-container bubbleview">
-    <div class="dev-page-view view-mode-normal">
-    <div class="dev-view-main-content">
-    <div class="dev-view-deviation">
-    {shadow}
-    <div class="journal-wrapper tt-a">
-    <div class="journal-wrapper2">
-    <div class="journal {cls} journalcontrol">
-    {html}
-    </div>
-    </div>
-    </div>
-    </div>
-    </div>
-    </div>
-    </div>
-    </div>
-</body>
-</html>
-"""
-
-JOURNAL_TEMPLATE_HTML_EXTRA = """\
-<div id="devskin0"><div class="negate-box-margin" style="">\
-<div usr class="gr-box gr-genericbox"
-        ><i usr class="gr1"><i></i></i
-        ><i usr class="gr2"><i></i></i
-        ><i usr class="gr3"><i></i></i
-        ><div usr class="gr-top">
-            <i usr class="tri"></i>
-            {}
-            </div>
-    </div><div usr class="gr-body"><div usr class="gr">
-            <div class="grf-indent">
-            <div class="text">
-                {}            </div>
-        </div>
-                </div></div>
-        <i usr class="gr3 gb"></i>
-        <i usr class="gr2 gb"></i>
-        <i usr class="gr1 gb gb1"></i>    </div>
-    </div></div>"""
-
-JOURNAL_TEMPLATE_TEXT = """text:{title}
-by {username}, {date}
-
-{content}
-"""
